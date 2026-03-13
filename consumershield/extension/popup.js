@@ -65,24 +65,71 @@ function setupActions() {
   });
 }
 
+// ── Backend API Integration ────────────────────────────────────
+async function getAIInsight(url, trackers, patterns) {
+  try {
+    const response = await fetch('http://localhost:8000/analyze-complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: url,
+        privacy_data: {
+          trackers: trackers || [],
+          fingerprinting: false
+        },
+        manipulation_data: {
+          patterns: patterns || []
+        }
+      })
+    });
+    const data = await response.json();
+    return data.combined_insight || null;
+  } catch(e) {
+    console.log('Backend unreachable:', e);
+    return null;
+  }
+}
+
 // ── Load analysis & render ────────────────────────────────────
 async function loadAndRender() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) return;
   const domain = normalizeDomain(tab.url);
 
-  chrome.storage.local.get([domain], (result) => {
+  chrome.storage.local.get([domain], async (result) => {
     const analysis = result[domain];
     if (analysis) {
       document.getElementById('scanning-indicator')?.classList.add('hidden');
       renderOverview(analysis);
       renderPrivacyTab(analysis);
       renderManipulationTab(analysis);
+      
+      // Fetch AI insight from backend
+      const aiInsight = await getAIInsight(
+        tab.url,
+        analysis.privacy?.trackers || [],
+        analysis.manipulation?.patterns || []
+      );
+      if (aiInsight) {
+        displayAIInsight(aiInsight);
+      }
     } else {
       // Retry after 2 seconds (content script may still be running)
       setTimeout(loadAndRender, 2000);
     }
   });
+}
+
+// ── Display AI Insight ────────────────────────────────────────
+function displayAIInsight(insight) {
+  const container = document.getElementById('overall-insight');
+  if (!container) return;
+  
+  const aiDiv = document.createElement('div');
+  aiDiv.id = 'ai-insight';
+  aiDiv.style.cssText = 'background: #f0f4ff; border-left: 3px solid #4f46e5; padding: 10px; margin-top: 10px; font-size: 12px; border-radius: 4px; line-height: 1.5;';
+  aiDiv.innerHTML = `🤖 AI Insight: ${escHtml(insight)}`;
+  container.parentNode.insertBefore(aiDiv, container.nextSibling);
 }
 
 // ── Overview tab ──────────────────────────────────────────────
@@ -109,7 +156,7 @@ function renderOverview(a) {
   if (progressFill) progressFill.style.width = `${(o.riskScore / 10) * 100}%`;
 
   const insightEl = document.getElementById('overall-insight');
-  if (insightEl) insightEl.textContent = o.insight || a.aiInsight || 'Analysis complete.';
+  if (insightEl) insightEl.textContent = o.insight || a.aiInsight || 'Analysis complete. Fetching AI insight...';
 
   // Stats
   setText('stat-trackers',   p.trackers?.length ?? 0);
