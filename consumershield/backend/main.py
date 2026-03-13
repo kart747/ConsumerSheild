@@ -10,6 +10,7 @@ Endpoints:
 
 import os
 import asyncio
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -132,6 +133,7 @@ class CompleteResponse(BaseModel):
     combined_insight: str
     regulatory_violations: List[Dict[str, str]]
     ai_powered: bool
+    ai_details: Optional[Dict[str, Any]] = None  # Contains gemini_insight, bert_classification, timestamp
 
 # ── Risk Calculators ──────────────────────────────────────────
 
@@ -216,33 +218,75 @@ def make_rule_insight(url: str, privacy: PrivacyData, manipulation: Manipulation
         return f"Moderate concerns: {tc} tracker(s) and {pc} dark pattern(s) found. Review the details below."
     return "No major privacy violations or dark patterns detected on this page. ✅"
 
-async def make_ai_insight(url: str, privacy: PrivacyData, manipulation: ManipulationData) -> str:
-    prompt = f"Website: {url}. Trackers: {len(privacy.trackers)}. Dark patterns: {len(manipulation.patterns)}. In 2 short sentences, explain the consumer risk and mention the DPDP Act 2023."
+async def make_ai_insight(url: str, privacy: PrivacyData, manipulation: ManipulationData) -> Dict[str, Any]:
+    """
+    Run Gemini and BERT models simultaneously using asyncio.gather.
+    Returns a dict with:
+      - gemini_insight: str or None
+      - bert_classification: dict with 'label' and 'confidence' or None
+      - timestamp: ISO timestamp
+      - combined_summary: human-readable summary
+    """
     
-    if GEMINI_AVAILABLE:
+    async def get_gemini_insight():
+        """Task to fetch Gemini insight with 4-second timeout"""
+        if not GEMINI_AVAILABLE:
+            return None
         try:
-            # Prevent hanging by enforcing a 4-second timeout
+            prompt = f"Website: {url}. Trackers: {len(privacy.trackers)}. Dark patterns: {len(manipulation.patterns)}. In 2 short sentences, explain the consumer risk and mention the DPDP Act 2023."
             response = await asyncio.wait_for(
                 asyncio.to_thread(gemini_model.generate_content, prompt),
                 timeout=4.0
             )
             return response.text.strip()
         except asyncio.TimeoutError:
-            print("[ConsumerShield] Gemini timed out! Falling back to BERT.")
+            print("[ConsumerShield] Gemini timed out after 4s")
+            return None
         except Exception as e:
             print(f"[ConsumerShield] Gemini error: {e}")
+            return None
 
-    # Fallback to local BERT if Gemini fails or times out
-    if LOCAL_NLP_AVAILABLE and manipulation.patterns:
+    async def get_bert_classification():
+        """Task to classify first dark pattern using local BERT"""
+        if not LOCAL_NLP_AVAILABLE or not manipulation.patterns:
+            return None
         try:
-            # Classify the first dark pattern found using the local model
             sample_text = manipulation.patterns[0].name
             bert_result = nlp_classifier(sample_text)
-            return f"Local NLP Analysis: Detected manipulative language with {round(bert_result[0]['score']*100, 1)}% confidence. This violates user autonomy principles under DPDP Act 2023."
+            return {
+                "label": bert_result[0].get("label", "unknown"),
+                "confidence": round(bert_result[0].get("score", 0.0) * 100, 1),
+                "text_analyzed": sample_text
+            }
         except Exception as e:
             print(f"[ConsumerShield] BERT error: {e}")
+            return None
 
-    return "Warning: High risk of psychological manipulation and data extraction detected on this site."
+    # Run both models simultaneously
+    gemini_insight, bert_classification = await asyncio.gather(
+        get_gemini_insight(),
+        get_bert_classification(),
+        return_exceptions=False
+    )
+
+    # Build combined summary
+    combined_parts = []
+    if gemini_insight:
+        combined_parts.append(f"🤖 Gemini: {gemini_insight}")
+    if bert_classification:
+        combined_parts.append(f"🧠 BERT: Detected '{bert_classification['label']}' with {bert_classification['confidence']}% confidence")
+    
+    if not combined_parts:
+        combined_summary = "⚠️ Warning: High risk of psychological manipulation and data extraction detected on this site."
+    else:
+        combined_summary = " | ".join(combined_parts)
+
+    return {
+        "gemini_insight": gemini_insight,
+        "bert_classification": bert_classification,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "combined_summary": combined_summary
+    }
 
 # ── Endpoints ─────────────────────────────────────────────────
 
@@ -288,9 +332,10 @@ async def analyze_complete(req: CompleteRequest):
         total_violations=total,
         privacy_insights=p_insights,
         manipulation_insights=m_insights,
-        combined_insight=combined,
+        combined_insight=combined.get("combined_summary", "Analysis complete."),
         regulatory_violations=violations,
         ai_powered=GEMINI_AVAILABLE,
+        ai_details=combined,
     )
 
 
