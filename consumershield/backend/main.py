@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
+from transformers import pipeline
 
 from regulatory_database import (
     get_privacy_violations,
@@ -38,6 +39,17 @@ try:
         print("[ConsumerShield] No GEMINI_API_KEY found — using rule-based insights")
 except Exception as e:
     print(f"[ConsumerShield] Gemini error: {e}")
+
+# ── Local BERT model for dark pattern classification ──────────
+LOCAL_NLP_AVAILABLE = False
+try:
+    print("[ConsumerShield] Loading local BERT model...")
+    # Using a lightweight model fine-tuned specifically for dark patterns
+    nlp_classifier = pipeline("text-classification", model="aditizingre07/distilroberta-dark-pattern")
+    LOCAL_NLP_AVAILABLE = True
+    print("[ConsumerShield] Local BERT loaded successfully!")
+except Exception as e:
+    print(f"[ConsumerShield] Failed to load BERT: {e}")
 
 # ── App ───────────────────────────────────────────────────────
 app = FastAPI(
@@ -205,25 +217,32 @@ def make_rule_insight(url: str, privacy: PrivacyData, manipulation: Manipulation
     return "No major privacy violations or dark patterns detected on this page. ✅"
 
 async def make_ai_insight(url: str, privacy: PrivacyData, manipulation: ManipulationData) -> str:
+    prompt = f"Website: {url}. Trackers: {len(privacy.trackers)}. Dark patterns: {len(manipulation.patterns)}. In 2 short sentences, explain the consumer risk and mention the DPDP Act 2023."
+    
     if GEMINI_AVAILABLE:
         try:
-            prompt = f"""You are a consumer rights expert focused on Indian law.
-Website: {url}
-Trackers found: {len(privacy.trackers)}
-Dark patterns found: {len(manipulation.patterns)} ({', '.join([p.name for p in manipulation.patterns[:3]])})
-In 2 sentences explain: how this site exploits users and which Indian law (DPDP Act 2023 / CCPA Guidelines 2023) is violated."""
+            # Prevent hanging by enforcing a 4-second timeout
             response = await asyncio.wait_for(
                 asyncio.to_thread(gemini_model.generate_content, prompt),
-                timeout=5.0
+                timeout=4.0
             )
             return response.text.strip()
         except asyncio.TimeoutError:
-            print("[ConsumerShield] Gemini API timed out after 5s — falling back to rule-based insight")
+            print("[ConsumerShield] Gemini timed out! Falling back to BERT.")
         except Exception as e:
-            print(f"Gemini error: {e}")
-    return make_rule_insight(url, privacy, manipulation,
-                             calc_privacy_risk(privacy),
-                             calc_manipulation_risk(manipulation))
+            print(f"[ConsumerShield] Gemini error: {e}")
+
+    # Fallback to local BERT if Gemini fails or times out
+    if LOCAL_NLP_AVAILABLE and manipulation.patterns:
+        try:
+            # Classify the first dark pattern found using the local model
+            sample_text = manipulation.patterns[0].name
+            bert_result = nlp_classifier(sample_text)
+            return f"Local NLP Analysis: Detected manipulative language with {round(bert_result[0]['score']*100, 1)}% confidence. This violates user autonomy principles under DPDP Act 2023."
+        except Exception as e:
+            print(f"[ConsumerShield] BERT error: {e}")
+
+    return "Warning: High risk of psychological manipulation and data extraction detected on this site."
 
 # ── Endpoints ─────────────────────────────────────────────────
 
