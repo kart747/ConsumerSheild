@@ -293,6 +293,8 @@
       { domain: 'connect.facebook.net', type: 'social', name: 'Facebook Pixel' },
       { domain: 'doubleclick.net', type: 'advertising', name: 'DoubleClick' },
       { domain: 'hotjar.com', type: 'analytics', name: 'Hotjar' },
+      { domain: 'newrelic.com', type: 'analytics', name: 'New Relic' },
+      { domain: 'nr-data.net', type: 'analytics', name: 'New Relic' },
       { domain: 'clevertap.com', type: 'analytics', name: 'CleverTap' },
       { domain: 'webengage.com', type: 'analytics', name: 'WebEngage' },
       { domain: 'moengage.com', type: 'analytics', name: 'MoEngage' },
