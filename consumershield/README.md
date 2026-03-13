@@ -28,6 +28,15 @@ pip install -r requirements.txt
 # Optional: set OpenAI key for AI insights
 echo "OPENAI_API_KEY=sk-..." > .env
 
+# Optional: enable Ethereum evidence anchoring (Sepolia)
+# RPC_URL from Infura/Alchemy, private key must have test ETH on Sepolia
+echo "RPC_URL=https://sepolia.infura.io/v3/YOUR_PROJECT_ID" >> .env
+echo "CONTRACT_ADDRESS=0xYourEvidenceRegistryAddress" >> .env
+echo "PRIVATE_KEY=0xYourPrivateKey" >> .env
+# Optional overrides
+echo "ETH_CHAIN_ID=11155111" >> .env
+echo "ETH_RECEIPT_TIMEOUT_SEC=180" >> .env
+
 # Start server
 uvicorn main:app --reload --port 8000
 ```

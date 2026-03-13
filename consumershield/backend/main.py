@@ -5,23 +5,47 @@ Endpoints:
   POST /analyze-complete       → full analysis (privacy + manipulation)
   POST /analyze-privacy        → privacy-only
   POST /analyze-dark-patterns  → manipulation-only
+  POST /test-ethereum-anchor   → developer test for blockchain anchoring
   GET  /health
 """
 
 import os
+import json
+import time
+import logging
+from pathlib import Path
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
-from regulatory_database import (
-    get_privacy_violations,
-    get_manipulation_violations,
-    REGULATORY_FRAMEWORK,
-)
+try:
+    from .ethereum_anchor import (
+        BlockchainAnchoringError,
+        store_report_hash_on_chain,
+    )
+    from .regulatory_database import (
+        get_privacy_violations,
+        get_manipulation_violations,
+        REGULATORY_FRAMEWORK,
+    )
+except ImportError:
+    from ethereum_anchor import (
+        BlockchainAnchoringError,
+        store_report_hash_on_chain,
+    )
+    from regulatory_database import (
+        get_privacy_violations,
+        get_manipulation_violations,
+        REGULATORY_FRAMEWORK,
+    )
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+REPORTS_DIR = BASE_DIR / "reports"
+load_dotenv(dotenv_path=BASE_DIR / ".env")
+logger = logging.getLogger("consumershield.api")
 
 # ── OpenAI setup (optional) ───────────────────────────────────
 OPENAI_AVAILABLE = False
@@ -118,6 +142,44 @@ class CompleteResponse(BaseModel):
     combined_insight: str
     regulatory_violations: List[Dict[str, str]]
     ai_powered: bool
+    blockchain_proof_stored: bool = False
+    ethereum_tx_hash: Optional[str] = None
+    report: Dict[str, Any] = {}
+    report_file: Optional[str] = None
+
+
+class EthereumAnchorTestResponse(BaseModel):
+    blockchain_proof_stored: bool
+    ethereum_tx_hash: Optional[str] = None
+    report: Dict[str, Any] = {}
+    report_file: Optional[str] = None
+    error: Optional[str] = None
+
+
+def anchor_report_proof(report_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Log, persist, and anchor the report hash on-chain without breaking API responses."""
+    # A) Log full report JSON to console
+    print("Generated report JSON:")
+    print(json.dumps(report_data, indent=2))
+
+    # B) Persist to local reports/ directory
+    REPORTS_DIR.mkdir(exist_ok=True)
+    report_filename = f"report_{int(time.time())}.json"
+    filepath = REPORTS_DIR / report_filename
+    with open(filepath, "w") as f:
+        json.dump(report_data, f, indent=2)
+    report_file = f"reports/{report_filename}"
+    print(f"[ConsumerShield] Report saved: {filepath}")
+
+    # C) Blockchain anchoring
+    try:
+        tx_hash = store_report_hash_on_chain(report_data)
+        if tx_hash and not tx_hash.startswith("0x"):
+            tx_hash = f"0x{tx_hash}"
+        return {"blockchain_proof_stored": True, "ethereum_tx_hash": tx_hash, "report_file": report_file}
+    except BlockchainAnchoringError as exc:
+        logger.warning("[ConsumerShield] Blockchain anchoring failed: %s", exc)
+        return {"blockchain_proof_stored": False, "ethereum_tx_hash": None, "report_file": report_file}
 
 # ── Risk Calculators ──────────────────────────────────────────
 
@@ -250,6 +312,34 @@ def health():
     return {"status": "ok", "version": "1.0.0", "ai_enabled": OPENAI_AVAILABLE}
 
 
+@app.post("/test-ethereum-anchor", response_model=EthereumAnchorTestResponse)
+async def test_ethereum_anchor():
+    report_data = {
+        "url": "https://example.com",
+        "violation_type": "fake urgency countdown",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "details": "Countdown timer resets after refresh",
+    }
+    try:
+        result = anchor_report_proof(report_data)
+        return EthereumAnchorTestResponse(
+            blockchain_proof_stored=result["blockchain_proof_stored"],
+            ethereum_tx_hash=result["ethereum_tx_hash"],
+            report=report_data,
+            report_file=result["report_file"],
+            error=None,
+        )
+    except Exception as exc:
+        logger.warning("[ConsumerShield] Test Ethereum anchor failed: %s", exc)
+        return EthereumAnchorTestResponse(
+            blockchain_proof_stored=False,
+            ethereum_tx_hash=None,
+            report=report_data,
+            report_file=None,
+            error=str(exc),
+        )
+
+
 @app.post("/analyze-complete", response_model=CompleteResponse)
 async def analyze_complete(req: CompleteRequest):
     p_risk = calc_privacy_risk(req.privacy_data)
@@ -271,6 +361,23 @@ async def analyze_complete(req: CompleteRequest):
 
     total = len(req.privacy_data.trackers) + len(req.manipulation_data.patterns)
 
+    report_data = {
+        "url": req.url,
+        "violation_type": "complete_analysis",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "detection_details": {
+            "privacy": req.privacy_data.dict(),
+            "manipulation": req.manipulation_data.dict(),
+            "risk": {
+                "privacy_risk": p_risk,
+                "manipulation_risk": m_risk,
+                "overall_risk": o_risk,
+            },
+            "regulatory_violations": violations,
+        },
+    }
+    blockchain_result = anchor_report_proof(report_data)
+
     return CompleteResponse(
         url=req.url,
         privacy_risk=p_risk,
@@ -285,6 +392,10 @@ async def analyze_complete(req: CompleteRequest):
         combined_insight=combined,
         regulatory_violations=violations,
         ai_powered=OPENAI_AVAILABLE,
+        blockchain_proof_stored=blockchain_result["blockchain_proof_stored"],
+        ethereum_tx_hash=blockchain_result["ethereum_tx_hash"],
+        report=report_data,
+        report_file=blockchain_result["report_file"],
     )
 
 
@@ -292,12 +403,30 @@ async def analyze_complete(req: CompleteRequest):
 async def analyze_privacy(req: PrivacyOnlyRequest):
     risk  = calc_privacy_risk(req.privacy_data)
     level = get_risk_level(risk)
+    violations = get_privacy_violations(req.privacy_data.dict())
+
+    report_data = {
+        "url": req.url,
+        "violation_type": "privacy_analysis",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "detection_details": {
+            "privacy": req.privacy_data.dict(),
+            "risk": {"privacy_risk": risk, "privacy_level": level},
+            "regulatory_violations": violations,
+        },
+    }
+    blockchain_result = anchor_report_proof(report_data)
+
     return {
         "url": req.url,
         "privacy_risk": risk,
         "privacy_level": level,
         "insights": make_privacy_insights(req.privacy_data),
-        "violations": get_privacy_violations(req.privacy_data.dict()),
+        "violations": violations,
+        "blockchain_proof_stored": blockchain_result["blockchain_proof_stored"],
+        "ethereum_tx_hash": blockchain_result["ethereum_tx_hash"],
+        "report": report_data,
+        "report_file": blockchain_result["report_file"],
     }
 
 
@@ -305,10 +434,28 @@ async def analyze_privacy(req: PrivacyOnlyRequest):
 async def analyze_dark_patterns(req: ManipulationOnlyRequest):
     risk  = calc_manipulation_risk(req.manipulation_data)
     level = get_risk_level(risk)
+    violations = get_manipulation_violations([p.dict() for p in req.manipulation_data.patterns])
+
+    report_data = {
+        "url": req.url,
+        "violation_type": "dark_pattern_analysis",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "detection_details": {
+            "manipulation": req.manipulation_data.dict(),
+            "risk": {"manipulation_risk": risk, "manipulation_level": level},
+            "regulatory_violations": violations,
+        },
+    }
+    blockchain_result = anchor_report_proof(report_data)
+
     return {
         "url": req.url,
         "manipulation_risk": risk,
         "manipulation_level": level,
         "insights": make_manipulation_insights(req.manipulation_data),
-        "violations": get_manipulation_violations([p.dict() for p in req.manipulation_data.patterns]),
+        "violations": violations,
+        "blockchain_proof_stored": blockchain_result["blockchain_proof_stored"],
+        "ethereum_tx_hash": blockchain_result["ethereum_tx_hash"],
+        "report": report_data,
+        "report_file": blockchain_result["report_file"],
     }
