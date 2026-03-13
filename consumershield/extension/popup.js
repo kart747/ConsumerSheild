@@ -65,6 +65,56 @@ function setupActions() {
       chrome.tabs.create({ url: reportUrl });
     });
   });
+
+  document.getElementById('btn-anchor')?.addEventListener('click', async (event) => {
+    const anchorButton = event.currentTarget;
+    if (!(anchorButton instanceof HTMLButtonElement)) return;
+
+    const existingTxHash = anchorButton.dataset.txHash;
+    if (existingTxHash) {
+      chrome.tabs.create({ url: `https://sepolia.etherscan.io/tx/${existingTxHash}` });
+      return;
+    }
+
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const currentUrl = tab?.url || '';
+    if (!currentUrl) {
+      alert('Unable to determine page URL.');
+      return;
+    }
+
+    const previousText = anchorButton.textContent || '⛓️ Anchor Evidence';
+    anchorButton.textContent = '⏳ Anchoring...';
+    anchorButton.disabled = true;
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/anchor-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: currentUrl,
+          summary: 'Forensic Audit Complete',
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok || data?.status !== 'success' || !data?.ethereum_tx_hash) {
+        throw new Error(data?.detail || `Anchor request failed (${response.status})`);
+      }
+
+      const txHash = String(data.ethereum_tx_hash);
+      anchorButton.dataset.txHash = txHash;
+      anchorButton.textContent = '✅ View on Etherscan';
+      anchorButton.disabled = false;
+      anchorButton.style.borderColor = '#22c55e';
+      anchorButton.style.color = '#bbf7d0';
+      anchorButton.style.background = 'rgba(34, 197, 94, 0.2)';
+    } catch (error) {
+      anchorButton.textContent = previousText;
+      anchorButton.disabled = false;
+      alert(`Failed to anchor evidence: ${error.message}`);
+    }
+  });
 }
 
 async function captureVisibleScreenshot(tab) {
@@ -178,7 +228,12 @@ async function displayAIInsight(tab, trackers, patterns) {
       const rawLabel = String(bert.label || 'unknown');
       const displayLabel = rawLabel.replace(/_/g, ' ');
       const conf = Number(bert.confidence || 0);
-      bertBlock = `🧠 <strong>BERT:</strong> ${escHtml(displayLabel)} (${conf.toFixed(1)}%)`;
+      const isNegativeLabel = /not[\s_-]*dark[\s_-]*pattern/i.test(rawLabel);
+      if (isNegativeLabel && tier3.length > 0) {
+        bertBlock = `🧠 <strong>BERT:</strong> Inconclusive against UI evidence (${conf.toFixed(1)}%)`;
+      } else {
+        bertBlock = `🧠 <strong>BERT:</strong> ${escHtml(displayLabel)} (${conf.toFixed(1)}%)`;
+      }
     }
 
     const summaryBlock = !geminiText

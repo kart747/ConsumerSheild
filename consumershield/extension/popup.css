@@ -1102,6 +1102,11 @@ body {
   transform: translateY(0);
 }
 
+#btn-anchor:disabled {
+  opacity: 0.72;
+  cursor: wait;
+}
+
 @media (max-width: 520px) {
   .dashboard-hero {
     grid-template-columns: 1fr;

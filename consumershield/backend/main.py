@@ -14,6 +14,7 @@ import json
 import base64
 import math
 import re
+import time
 import ipaddress
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
@@ -28,6 +29,7 @@ from regulatory_database import (
     get_manipulation_violations,
     REGULATORY_FRAMEWORK,
 )
+from ethereum_anchor import store_report_hash_on_chain
 
 load_dotenv()
 
@@ -51,12 +53,47 @@ FORENSIC_AUDITOR_SYSTEM_INSTRUCTION = (
 )
 
 GEMINI_AVAILABLE = False
-GEMINI_MODEL_NAME: str = "gemini-3-flash-preview"
+GEMINI_MODEL_NAME: str = os.getenv("GEMINI_PRIMARY_MODEL", "gemini-flash-lite-latest")
 _gemini_client = None    # google.genai Client instance
 
 # Ordered preference — first that succeeds at runtime wins
-MODELS_TO_TRY = ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.0-flash"]
-_GEMINI_MODEL_CANDIDATES = MODELS_TO_TRY
+MODELS_TO_TRY = [
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest",
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+]
+
+
+def _load_model_candidates_from_env(defaults: List[str]) -> List[str]:
+    """Allow runtime model overrides via GEMINI_MODELS_TO_TRY without code edits."""
+    raw = os.getenv("GEMINI_MODELS_TO_TRY", "")
+    if not raw.strip():
+        return defaults
+
+    parsed = [entry.strip() for entry in raw.split(",") if entry.strip()]
+    return parsed or defaults
+
+
+_GEMINI_MODEL_CANDIDATES = _load_model_candidates_from_env(MODELS_TO_TRY)
+_GEMINI_MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
+_GEMINI_GLOBAL_COOLDOWN_UNTIL: float = 0.0
+
+
+def _extract_retry_seconds_from_error(error_text: str) -> Optional[int]:
+    if not error_text:
+        return None
+
+    # Handles formats like "Please retry in 24.79s" or "retryDelay': '24s'".
+    match = re.search(r"retry\s*(?:in|delay)\s*[:=]?\s*'?([0-9]+(?:\.[0-9]+)?)s", error_text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return max(1, int(math.ceil(float(match.group(1)))))
+    except (TypeError, ValueError):
+        return None
 
 try:
     gemini_key = os.getenv("GEMINI_API_KEY")
@@ -384,6 +421,11 @@ class CompleteRequest(BaseModel):
     dom_text: Optional[str] = None
     aria_text: Optional[str] = None
 
+
+class AnchorRequest(BaseModel):
+    url: str
+    summary: str
+
 class PrivacyOnlyRequest(BaseModel):
     url: str
     privacy_data: PrivacyData
@@ -527,6 +569,16 @@ def make_tier3_rule_fallback(manipulation: ManipulationData) -> List[Dict[str, s
     findings: Dict[str, Dict[str, str]] = {}
     severity_order = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
+    def clean_evidence(raw: str, cue_regex: str, fallback: str) -> str:
+        text = re.sub(r"\s+", " ", str(raw or "")).strip()
+        if not text:
+            return fallback
+        if len(text) > 220:
+            text = text[:220]
+        if len(text) > 140 and not re.search(cue_regex, text.lower()):
+            return fallback
+        return text
+
     def add_finding(
         pattern_name: str,
         severity: str,
@@ -567,7 +619,11 @@ def make_tier3_rule_fallback(manipulation: ManipulationData) -> List[Dict[str, s
             add_finding(
                 pattern_name="Confirmshaming",
                 severity="high" if _to_tier3_severity(p.severity) == "HIGH" else "medium",
-                evidence_text=evidence,
+                evidence_text=clean_evidence(
+                    evidence,
+                    r"confirmsham|no\s*thanks|prefer\s*to\s*pay|rather\s*pay|pay\s*full\s*price|decline",
+                    "Reject action appears framed with guilt-inducing wording.",
+                ),
                 visual_proof="The rejection path uses guilt-loaded wording compared to a neutral acceptance path.",
                 legal_violation="DPDP Act 2023 Section 6 (Non-ambiguous Consent); CCPA Dark Patterns Guidelines 2023 (Confirmshaming)",
             )
@@ -583,21 +639,30 @@ def make_tier3_rule_fallback(manipulation: ManipulationData) -> List[Dict[str, s
             add_finding(
                 pattern_name="Trick Wording",
                 severity="high" if _to_tier3_severity(p.severity) == "HIGH" else "medium",
-                evidence_text=evidence,
+                evidence_text=clean_evidence(
+                    evidence,
+                    r"uncheck|untick|double\s*negative|do\s*not|opt\s*out|not\s*receive",
+                    "Consent copy appears to use double-negative or inversion phrasing.",
+                ),
                 visual_proof="Consent copy contains a double negative that can invert the user’s intended choice.",
                 legal_violation="DPDP Act 2023 Section 6 (Non-ambiguous Consent); CCPA Dark Patterns Guidelines 2023 (Trick Questions)",
             )
 
         if (
-            "misdirection" in low
-            or "visual interference" in low
+            "visual interference" in low
+            or "accept-vs-reject visual weight ratio" in low
+            or "reject appears weak/hidden" in low
             or re.search(r"\b(high\s*contrast|highlight(ed)?\s*accept|bright\s*accept)\b", low)
             or re.search(r"\b(low\s*contrast|grey(ed)?\s*out|faded|hidden\s*reject|small\s*reject)\b", low)
         ):
             add_finding(
                 pattern_name="Visual Interference",
                 severity="high",
-                evidence_text=evidence,
+                evidence_text=clean_evidence(
+                    evidence,
+                    r"visual\s*interference|accept-vs-reject|low\s*contrast|hidden\s*reject|weak/hidden",
+                    "Accept action appears visually emphasized over reject action.",
+                ),
                 visual_proof="The 'Accept' action appears visually dominant while 'Reject' appears muted, low-contrast, or hidden.",
                 legal_violation="DPDP Act 2023 Section 6 (Free, specific, informed consent); CCPA Dark Patterns Guidelines 2023 (Misdirection)",
             )
@@ -612,7 +677,11 @@ def make_tier3_rule_fallback(manipulation: ManipulationData) -> List[Dict[str, s
             add_finding(
                 pattern_name="False Hierarchy",
                 severity="high" if _to_tier3_severity(p.severity) == "HIGH" else "medium",
-                evidence_text=evidence,
+                evidence_text=clean_evidence(
+                    evidence,
+                    r"false\s*hierarchy|3\s*click|three\s*click|buried|deep\s*menu|hard\s*to\s*find",
+                    "Opt-out path appears to require extra navigation compared to opt-in.",
+                ),
                 visual_proof="The opt-out path appears buried behind extra navigation steps compared to the opt-in path.",
                 legal_violation="DPDP Act 2023 Section 12 (Right to withdraw consent); CCPA Dark Patterns Guidelines 2023 (Obstruction)",
             )
@@ -657,6 +726,132 @@ def _decode_image_data_url(data_url: Optional[str]) -> Optional[Dict[str, Any]]:
         print(f"[ConsumerShield] Failed to decode screenshot payload: {exc}")
         return None
 
+
+HIGH_SIGNAL_TERMS = (
+    "accept",
+    "reject",
+    "decline",
+    "allow",
+    "cookie",
+    "consent",
+    "no thanks",
+    "manage",
+    "settings",
+    "opt out",
+    "unsubscribe",
+    "cancel",
+    "uncheck",
+    "untick",
+    "double negative",
+    "confirm",
+    "agree",
+    "necessary",
+    "essential",
+    "marketing",
+    "newsletter",
+)
+
+
+def _compact_ws(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _extract_signal_snippets(raw_text: Optional[str], *, max_lines: int, max_chars: int) -> str:
+    source = str(raw_text or "")
+    if not source.strip():
+        return "(unavailable)"
+
+    candidates: List[str] = []
+
+    for line in source.splitlines():
+        clean = _compact_ws(line)
+        if len(clean) >= 10:
+            candidates.append(clean)
+
+    if len(candidates) < max_lines:
+        sentence_source = _compact_ws(source)
+        for sentence in re.split(r"(?<=[.!?])\s+", sentence_source):
+            clean = _compact_ws(sentence)
+            if len(clean) >= 24:
+                candidates.append(clean)
+            if len(candidates) >= max_lines * 3:
+                break
+
+    prioritized: List[str] = []
+    seen = set()
+    for text in candidates:
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        if any(term in lowered for term in HIGH_SIGNAL_TERMS):
+            prioritized.append(text[:240])
+
+    if not prioritized:
+        prioritized = [entry[:240] for entry in candidates[:max_lines]]
+
+    clipped: List[str] = []
+    total_chars = 0
+    for entry in prioritized:
+        if len(clipped) >= max_lines:
+            break
+        if total_chars + len(entry) > max_chars:
+            break
+        clipped.append(entry)
+        total_chars += len(entry)
+
+    return "\n".join(clipped) if clipped else "(unavailable)"
+
+
+def _format_detector_findings(manipulation: ManipulationData) -> str:
+    lines: List[str] = []
+    for pattern in manipulation.patterns[:10]:
+        detail = _compact_ws(pattern.text or pattern.description or "(no sample text)")[:220]
+        lines.append(f"- [{str(pattern.severity or '').upper()}] {pattern.name}: {detail}")
+    return "\n".join(lines) if lines else "- (none detected)"
+
+
+def _normalize_tier3_patterns_from_json(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
+    tier3: List[Dict[str, Any]] = []
+
+    raw_patterns = parsed.get("tier3_patterns")
+    if isinstance(raw_patterns, list):
+        for item in raw_patterns:
+            if not isinstance(item, dict):
+                continue
+
+            normalized: Dict[str, Any] = {
+                "pattern_name": _compact_ws(item.get("pattern_name") or item.get("pattern") or "Unknown"),
+                "severity": _to_tier3_severity(item.get("severity")),
+                "evidence_text": _compact_ws(item.get("evidence_text") or item.get("evidence") or ""),
+                "visual_proof": _compact_ws(item.get("visual_proof") or item.get("visual_evidence") or ""),
+                "legal_violation": _compact_ws(item.get("legal_violation") or "DPDP Act 2023 Section 6"),
+            }
+
+            confidence_raw = item.get("confidence")
+            try:
+                if confidence_raw is not None:
+                    confidence = max(0.0, min(1.0, float(confidence_raw)))
+                    normalized["confidence"] = round(confidence, 2)
+            except (TypeError, ValueError):
+                pass
+
+            tier3.append(normalized)
+
+    if not tier3 and "pattern_detected" in parsed:
+        raw_detected = parsed.get("pattern_detected", False)
+        detected = raw_detected if isinstance(raw_detected, bool) else str(raw_detected).strip().lower() in {"true", "1", "yes"}
+        if detected:
+            tier3.append({
+                "pattern_name": _compact_ws(parsed.get("pattern_name") or "Unknown"),
+                "severity": _to_tier3_severity(parsed.get("severity")),
+                "evidence_text": _compact_ws(parsed.get("evidence") or ""),
+                "visual_proof": _compact_ws(parsed.get("evidence") or ""),
+                "legal_violation": _compact_ws(parsed.get("legal_violation") or "DPDP Act 2023 Section 6"),
+            })
+
+    return tier3
+
 async def make_ai_insight(
     url: str,
     privacy: PrivacyData,
@@ -676,6 +871,8 @@ async def make_ai_insight(
     
     async def get_gemini_insight():
         """Forensic Auditor prompt → JSON with tier3_patterns + risk_summary."""
+        global _GEMINI_GLOBAL_COOLDOWN_UNTIL
+
         if not GEMINI_AVAILABLE:
             return {
                 "text": None,
@@ -683,37 +880,44 @@ async def make_ai_insight(
                 "error": "Gemini API key is not configured. Using forensic fallback.",
             }
 
-        pattern_lines: List[str] = []
-        for p in manipulation.patterns:
-            detail = (p.text or p.description or "(no sample text)")[:240]
-            pattern_lines.append(f"- [{p.severity.upper()}] {p.name}: {detail}")
-        pattern_context = "\n".join(pattern_lines) if pattern_lines else "- (none detected)"
+        now = time.time()
+        if _GEMINI_GLOBAL_COOLDOWN_UNTIL > now:
+            wait_seconds = int(math.ceil(_GEMINI_GLOBAL_COOLDOWN_UNTIL - now))
+            return {
+                "text": None,
+                "tier3_patterns": [],
+                "error": f"Cloud AI quota cooling down ({wait_seconds}s). Deterministic forensic fallback engaged.",
+                "forensic_json": None,
+            }
 
-        dom_excerpt = (dom_text or "").strip()[:12000]
-        aria_excerpt = (aria_text or "").strip()[:7000]
-        if not dom_excerpt:
-            dom_excerpt = "(DOM text unavailable)"
-        if not aria_excerpt:
-            aria_excerpt = "(ARIA labels unavailable)"
+        pattern_context = _format_detector_findings(manipulation)
+        dom_excerpt = _extract_signal_snippets(dom_text, max_lines=14, max_chars=3200)
+        aria_excerpt = _extract_signal_snippets(aria_text, max_lines=16, max_chars=2000)
 
         prompt = (
-            "I have attached a screenshot and the DOM text of a webpage.\n"
-            "Your task is to perform a Consumer Protection Audit.\n\n"
-            "Analyze the Image: Check for Visual Interference (e.g., hidden 'Reject' buttons).\n\n"
-            "Analyze the Text: Check for Confirmshaming or Trick Wording.\n\n"
-            "CRITICAL: If you see the image, identify the specific coordinates or colors that are manipulative.\n\n"
+            "You are auditing a website for Tier-3 dark patterns using screenshot + high-signal UX text.\n"
             f"URL: {url}\n"
-            f"Existing detector findings:\n{pattern_context}\n\n"
-            f"DOM text:\n{dom_excerpt}\n\n"
-            f"ARIA text:\n{aria_excerpt}\n\n"
-            "Respond ONLY in JSON format:\n"
+            "Existing detector findings:\n"
+            f"{pattern_context}\n\n"
+            "High-signal DOM snippets:\n"
+            f"{dom_excerpt}\n\n"
+            "High-signal ARIA/button snippets:\n"
+            f"{aria_excerpt}\n\n"
+            "Return STRICT JSON with this exact shape:\n"
             "{\n"
-            '  "pattern_detected": true/false,\n'
-            '  "pattern_name": "...",\n'
-            '  "severity": "HIGH/MEDIUM/LOW",\n'
-            '  "evidence": "Describe what you see in the screenshot or text.",\n'
-            '  "legal_violation": "DPDP Act 2023 Section 6"\n'
+            '  "risk_summary": "one concise sentence",\n'
+            '  "tier3_patterns": [\n'
+            "    {\n"
+            '      "pattern_name": "Confirmshaming|Visual Interference|False Hierarchy|Trick Wording",\n'
+            '      "severity": "HIGH|MEDIUM|LOW",\n'
+            '      "evidence_text": "quoted or paraphrased evidence",\n'
+            '      "visual_proof": "visual cue from screenshot if available, else empty string",\n'
+            '      "legal_violation": "DPDP Act 2023 Section ...; CCPA 2023 ...",\n'
+            '      "confidence": 0.0\n'
+            "    }\n"
+            "  ]\n"
             "}"
+            "\nRules: max 4 patterns, avoid duplicates, no markdown fences, no prose outside JSON."
         )
 
         image_payload = _decode_image_data_url(screenshot_data_url)
@@ -733,10 +937,22 @@ async def make_ai_insight(
             temperature=0.2,
         )
 
-        timeouts = (8.0, 12.0)
-        model = GEMINI_MODEL_NAME
+        candidate_models: List[str] = []
+        for candidate in [GEMINI_MODEL_NAME, *_GEMINI_MODEL_CANDIDATES]:
+            if candidate and candidate not in candidate_models:
+                candidate_models.append(candidate)
+
         last_error: Optional[str] = None
-        for timeout_seconds in timeouts:
+        max_quota_retry_seconds = 0
+        timeout_seconds = 10.0
+        for model in candidate_models:
+            now = time.time()
+            model_cooldown_until = _GEMINI_MODEL_COOLDOWN_UNTIL.get(model, 0.0)
+            if model_cooldown_until > now:
+                wait_seconds = int(math.ceil(model_cooldown_until - now))
+                print(f"[ConsumerShield] Skipping {model}; quota cooldown {wait_seconds}s remaining")
+                continue
+
             try:
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -747,144 +963,80 @@ async def make_ai_insight(
                     ),
                     timeout=timeout_seconds,
                 )
+
                 raw = getattr(response, "text", None)
                 if not isinstance(raw, str) or not raw.strip():
-                    # Try candidate parts if .text is empty
                     try:
                         raw = response.candidates[0].content.parts[0].text
                     except Exception:
                         pass
+
                 if not isinstance(raw, str) or not raw.strip():
+                    last_error = "Gemini returned an empty response."
                     continue
-                # Strip markdown fences that Gemini sometimes wraps around JSON
+
                 clean = re.sub(r"```(?:json)?\s*", "", raw).strip().strip("`").strip()
                 try:
                     parsed = json.loads(clean)
                 except json.JSONDecodeError as je:
-                    print(f"[ConsumerShield] Gemini JSON parse error: {je} — raw: {raw[:200]}")
-                    return {
-                        "text": raw.strip()[:500],
-                        "tier3_patterns": [],
-                        "error": "Gemini returned non-JSON output. Using fallback where needed.",
-                        "forensic_json": None,
-                    }
+                    print(f"[ConsumerShield] Gemini JSON parse error ({model}): {je} — raw: {raw[:200]}")
+                    last_error = "Gemini returned non-JSON output."
+                    continue
 
                 if not isinstance(parsed, dict):
-                    return {
-                        "text": "Gemini response was not a JSON object.",
-                        "tier3_patterns": [],
-                        "error": "Gemini returned an unsupported JSON shape.",
-                        "forensic_json": None,
-                    }
+                    last_error = "Gemini returned an unsupported JSON shape."
+                    continue
 
-                tier3: List[Dict[str, str]] = []
-                summary: str = ""
+                tier3 = _normalize_tier3_patterns_from_json(parsed)
+                summary = _compact_ws(
+                    parsed.get("risk_summary")
+                    or parsed.get("summary")
+                    or parsed.get("evidence")
+                    or ""
+                )
+                if not summary and tier3:
+                    summary = f"{tier3[0].get('pattern_name', 'Dark pattern')} detected."
 
-                # Preferred strict schema from user prompt
-                if "pattern_detected" in parsed:
-                    raw_detected = parsed.get("pattern_detected", False)
-                    if isinstance(raw_detected, bool):
-                        detected = raw_detected
-                    else:
-                        detected = str(raw_detected).strip().lower() in {"true", "1", "yes"}
-                    pattern_name = str(parsed.get("pattern_name", "")).strip() or "Unknown"
-                    severity = _to_tier3_severity(str(parsed.get("severity", "MEDIUM")))
-                    evidence = str(parsed.get("evidence", "")).strip()
-                    legal_violation = str(parsed.get("legal_violation", "")).strip() or "DPDP Act 2023 Section 6"
+                _GEMINI_MODEL_COOLDOWN_UNTIL.pop(model, None)
+                _GEMINI_GLOBAL_COOLDOWN_UNTIL = 0.0
 
-                    if detected:
-                        tier3.append({
-                            "pattern_name": pattern_name,
-                            "severity": severity,
-                            "evidence_text": evidence,
-                            "visual_proof": evidence,
-                            "legal_violation": legal_violation,
-                        })
-
-                    summary = evidence or (
-                        "No manipulative pattern detected in provided screenshot and DOM text."
-                        if not detected else f"{pattern_name} detected."
-                    )
-                else:
-                    # Backward compatibility with earlier schema
-                    for item in parsed.get("tier3_patterns", []) or []:
-                        if not isinstance(item, dict):
-                            continue
-                        tier3.append({
-                            "pattern_name": str(item.get("pattern_name", "")).strip() or "Unknown",
-                            "severity": _to_tier3_severity(str(item.get("severity", "MEDIUM"))),
-                            "evidence_text": str(item.get("evidence_text", "")).strip(),
-                            "visual_proof": str(item.get("visual_proof", "")).strip(),
-                            "legal_violation": str(item.get("legal_violation", "")).strip(),
-                        })
-                    summary = str(parsed.get("risk_summary", "")).strip()
-
-                print(f"[ConsumerShield] Gemini OK — {len(tier3)} Tier 3 pattern(s) found")
+                print(f"[ConsumerShield] Gemini OK ({model}) — {len(tier3)} Tier 3 pattern(s) found")
                 return {
                     "text": summary or None,
                     "tier3_patterns": tier3,
                     "error": None,
                     "forensic_json": parsed,
                 }
+
             except asyncio.TimeoutError:
-                print(f"[ConsumerShield] Gemini timed out after {timeout_seconds}s, trying next model")
-                last_error = "Gemini timed out. Using forensic fallback output."
-                if model == GEMINI_MODEL_NAME and len(_GEMINI_MODEL_CANDIDATES) > 1:
-                    model = _GEMINI_MODEL_CANDIDATES[1]   # try fallback model on retry
+                print(f"[ConsumerShield] Gemini timed out after {timeout_seconds}s on model {model}")
+                last_error = "Gemini timed out. Deterministic forensic fallback engaged."
                 continue
             except Exception as e:
                 real_error = str(e)
-                print(f"🚨 REAL GEMINI ERROR: {real_error}")
+                print(f"🚨 REAL GEMINI ERROR ({model}): {real_error}")
 
-                # --- HACKATHON DEMO MOCK / ERROR CLEANUP ---
+                retry_seconds = _extract_retry_seconds_from_error(real_error)
+
                 if (
                     "429" in real_error
                     or "RESOURCE_EXHAUSTED" in real_error
                     or "limit: 0" in real_error
-                    or "404" in real_error
                 ):
-                    gemini_status = "Cloud AI rate limit reached. Deterministic fallback engaged."
-                    print("⚠️ API Unavailable: Triggering Hackathon Demo Mock Response...")
+                    if retry_seconds:
+                        _GEMINI_MODEL_COOLDOWN_UNTIL[model] = time.time() + retry_seconds
+                        max_quota_retry_seconds = max(max_quota_retry_seconds, retry_seconds)
+                    last_error = "Cloud AI unavailable (quota/model). Deterministic forensic fallback engaged."
+                elif "404" in real_error or "NOT_FOUND" in real_error:
+                    # If a model is not available to this key, cool it down for longer.
+                    _GEMINI_MODEL_COOLDOWN_UNTIL[model] = time.time() + 3600
+                    last_error = "Cloud AI unavailable (quota/model). Deterministic forensic fallback engaged."
+                else:
+                    last_error = "AI Error: Connection failed."
+                continue
 
-                    mock_json_text = """{
-                      "pattern_detected": true,
-                      "pattern_name": "Visual Interference & Confirmshaming",
-                      "severity": "HIGH",
-                      "evidence": "Visual audit confirms high-contrast manipulation on the 'Accept' button while burying the 'Reject' path.",
-                      "legal_violation": "Section 6, DPDP Act 2023 (Informed Consent)"
-                    }"""
-
-                    parsed_mock = json.loads(mock_json_text)
-                    return {
-                        "text": parsed_mock.get("evidence"),
-                        "tier3_patterns": [
-                            {
-                                "pattern_name": "Visual Interference",
-                                "severity": "HIGH",
-                                "evidence_text": parsed_mock.get("evidence", ""),
-                                "visual_proof": parsed_mock.get("evidence", ""),
-                                "legal_violation": parsed_mock.get("legal_violation", "DPDP Act 2023 Section 6"),
-                            },
-                            {
-                                "pattern_name": "Confirmshaming",
-                                "severity": "HIGH",
-                                "evidence_text": parsed_mock.get("evidence", ""),
-                                "visual_proof": parsed_mock.get("evidence", ""),
-                                "legal_violation": parsed_mock.get("legal_violation", "DPDP Act 2023 Section 6"),
-                            },
-                        ],
-                        "error": gemini_status,
-                        "forensic_json": parsed_mock,
-                    }
-                # -------------------------------------------
-
-                gemini_status = "AI Error: Connection failed."
-                return {
-                    "text": None,
-                    "tier3_patterns": [],
-                    "error": gemini_status,
-                    "forensic_json": None,
-                }
+        if max_quota_retry_seconds > 0:
+            _GEMINI_GLOBAL_COOLDOWN_UNTIL = max(_GEMINI_GLOBAL_COOLDOWN_UNTIL, time.time() + max_quota_retry_seconds)
 
         return {
             "text": None,
@@ -978,11 +1130,14 @@ async def make_ai_insight(
 
 @app.get("/health")
 def health():
+    remaining_cooldown = max(0, int(math.ceil(_GEMINI_GLOBAL_COOLDOWN_UNTIL - time.time())))
     return {
         "status": "ok",
         "version": "1.0.0",
         "gemini_enabled": GEMINI_AVAILABLE,
         "gemini_model": GEMINI_MODEL_NAME,
+        "gemini_models_to_try": _GEMINI_MODEL_CANDIDATES,
+        "gemini_quota_cooldown_sec": remaining_cooldown,
         "ai_powered": GEMINI_AVAILABLE
     }
 
@@ -1123,3 +1278,17 @@ async def analyze_dark_patterns(req: ManipulationOnlyRequest):
         "insights": make_manipulation_insights(req.manipulation_data),
         "violations": get_manipulation_violations([p.dict() for p in req.manipulation_data.patterns]),
     }
+
+
+@app.post("/anchor-report")
+async def anchor_report(req: AnchorRequest):
+    try:
+        payload = {
+            "url": req.url,
+            "summary": req.summary,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        tx_hash = store_report_hash_on_chain(payload)
+        return {"status": "success", "ethereum_tx_hash": tx_hash}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}

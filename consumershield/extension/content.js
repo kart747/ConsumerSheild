@@ -182,11 +182,11 @@
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Directs users toward unintended options through visual or hierarchical emphasis.',
       patterns: [
-        /(?:highly\s*|most\s*|top\s*)?recommended/i,
+        /(?:highly\s*|most\s*|top\s*)?recommended\s*(?:plan|product|offer|choice|option)/i,
         /best.*seller|best.*choice/i,
         /customers?\s*(?:also\s*)?(?:like|buy|chose|prefer)/i,
         /popular\s*(?:choice|item|product)/i,
-        /trending/i,
+        /trending\s*(?:deal|offer|product|item|plan)/i,
         /(?:click\s*|tap\s*)?here\s*for\s*(?:savings?|discount|deal)/i,
         /pre[\s-]?selected/i,
         /default.*(?:yes|selected|opted)/i,
@@ -358,29 +358,38 @@
 
   function detectDarkPatterns() {
     const bodyText = document.body?.innerText || '';
-    const allButtons = Array.from(document.querySelectorAll('button, a, label, span, div, p'));
+    const candidates = collectDarkPatternCandidates(bodyText);
 
     Object.entries(DARK_PATTERNS).forEach(([type, config]) => {
       // Text pattern matching
-      config.patterns.forEach(regex => {
-        if (regex.test(bodyText)) {
-          // Find the actual DOM element containing this text for overlay
-          const el = findElementContaining(regex);
-          const existing = state.patterns.find(p => p.type === type);
-          if (!existing) {
-            state.patterns.push({
-              type,
-              name: config.name,
-              severity: config.severity,
-              confidence: el ? 0.9 : 0.7,
-              law: config.law,
-              penalty: config.penalty,
-              description: config.description,
-              element: el,
-              text: el ? (el.innerText || el.textContent).slice(0, 100).trim() : getPatternSample(bodyText, regex),
-            });
-          }
-          if (el) applyOverlay(el, 'manipulation', config.name);
+      config.patterns.forEach((regex) => {
+        const matchedCandidate = candidates.find((candidate) => regex.test(candidate.text));
+        if (!matchedCandidate) return;
+
+        const existing = state.patterns.find((p) => p.type === type);
+        const sampleText = getPatternSample(matchedCandidate.text, regex) || matchedCandidate.text.slice(0, 100).trim();
+        const confidence = Math.min(0.97, (matchedCandidate.contextScore || 0.7) + (matchedCandidate.element ? 0.08 : 0));
+
+        if (!existing) {
+          state.patterns.push({
+            type,
+            name: config.name,
+            severity: config.severity,
+            confidence,
+            law: config.law,
+            penalty: config.penalty,
+            description: config.description,
+            element: matchedCandidate.element,
+            text: sampleText,
+          });
+        } else if ((existing.confidence || 0) < confidence) {
+          existing.confidence = confidence;
+          existing.text = sampleText;
+          existing.element = matchedCandidate.element || existing.element;
+        }
+
+        if (matchedCandidate.element) {
+          applyOverlay(matchedCandidate.element, 'manipulation', config.name);
         }
       });
     });
@@ -393,6 +402,8 @@
     detectStickyBanners();
     detectModalsAndPopups();
     detectDifficultCancellation();
+    detectTrickWordingAdvanced();
+    detectVisualInterference();
   }
 
   function detectPreselectedOptions() {
@@ -486,7 +497,15 @@
     const visibleModals = Array.from(modals).filter(el => {
       const isVisible = el.offsetHeight > 0 && window.getComputedStyle(el).display !== 'none' && window.getComputedStyle(el).visibility !== 'hidden';
       const notTooBig = el.offsetHeight < 800 && el.offsetWidth < 800;
-      return isVisible && notTooBig;
+      if (!isVisible || !notTooBig) return false;
+
+      const text = normalizeScanText(el.textContent || '');
+      const hasPersuasiveText = /(subscribe|sign\s*up|allow\s*notifications|accept\s*all|limited|offer|deal|save|continue|cookie|consent)/i.test(text);
+      const style = window.getComputedStyle(el);
+      const looksBlocking = style.position === 'fixed' || style.zIndex === '9999' || style.zIndex === '10000' || /overlay|backdrop/i.test(el.className || '');
+      const hasActionControls = !!el.querySelector('button, a, [role="button"], input[type="submit"], input[type="button"]');
+      const isFocusedContainer = text.length > 0 && text.length < 1600;
+      return isFocusedContainer && hasActionControls && (hasPersuasiveText || looksBlocking);
     });
 
     if (visibleModals.length > 0) {
@@ -496,10 +515,10 @@
           type: 'nagging',
           name: 'Intrusive Modals',
           severity: 'medium',
-          confidence: 0.8,
+          confidence: Math.min(0.9, 0.72 + (visibleModals.length * 0.04)),
           law: DARK_PATTERNS.nagging.law,
           penalty: DARK_PATTERNS.nagging.penalty,
-          description: `${visibleModals.length} modal(s) or popup(s) detected to interrupt user experience.`,
+          description: `${visibleModals.length} persuasive/blocking modal(s) detected that may pressure user action.`,
           element: visibleModals[0],
           text: `${visibleModals.length} modal/popup detected`,
         });
@@ -539,6 +558,109 @@
         }
       }
     }
+  }
+
+  function detectTrickWordingAdvanced() {
+    const explicitFormCueRegex = /\b(uncheck|untick|opt[\s-]?out|do\s*not|don't|not\s*receive|not\s*want|without\s*consent)\b/i;
+    const candidates = collectDarkPatternCandidates(document.body?.innerText || '')
+      .filter((candidate) => (
+        candidate.text.length <= 220
+        && /\b(consent|cookie|marketing|newsletter|email|updates?|notifications?|subscribe|opt|receive|communication)\b/i.test(candidate.text)
+        && explicitFormCueRegex.test(candidate.text)
+      ));
+
+    const negationRegex = /\b(no|not|never|without|uncheck|untick|opt[\s-]?out|do\s*not|don't|cannot|can't)\b/gi;
+    let bestMatch = null;
+
+    candidates.forEach((candidate) => {
+      const negations = candidate.text.match(negationRegex) || [];
+      if (negations.length < 2) return;
+      const score = Math.min(0.95, 0.72 + (negations.length * 0.07));
+      if (!bestMatch || score > bestMatch.score) {
+        bestMatch = { candidate, score, negationCount: negations.length };
+      }
+    });
+
+    if (!bestMatch) return;
+
+    const existing = state.patterns.find((p) => p.type === 'trick_questions');
+    const description = `Consent text contains ${bestMatch.negationCount} negation cues, indicating possible double-negative wording.`;
+
+    if (!existing) {
+      state.patterns.push({
+        type: 'trick_questions',
+        name: DARK_PATTERNS.trick_questions.name,
+        severity: bestMatch.negationCount >= 3 ? 'high' : 'medium',
+        confidence: bestMatch.score,
+        law: DARK_PATTERNS.trick_questions.law,
+        penalty: DARK_PATTERNS.trick_questions.penalty,
+        description,
+        element: bestMatch.candidate.element,
+        text: bestMatch.candidate.text.slice(0, 120),
+      });
+    } else if ((existing.confidence || 0) < bestMatch.score) {
+      existing.confidence = bestMatch.score;
+      existing.description = description;
+      existing.text = bestMatch.candidate.text.slice(0, 120);
+      existing.element = bestMatch.candidate.element || existing.element;
+    }
+
+    if (bestMatch.candidate.element) {
+      applyOverlay(bestMatch.candidate.element, 'manipulation', DARK_PATTERNS.trick_questions.name);
+    }
+  }
+
+  function detectVisualInterference() {
+    const containers = findConsentContainers();
+    let bestFinding = null;
+
+    containers.forEach((container) => {
+      const actions = Array.from(container.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]'))
+        .filter((el) => isElementVisibleForDetection(el));
+      if (actions.length < 2) return;
+
+      const acceptEl = actions.find((el) => /\b(accept|allow|agree|yes|continue|ok|got\s*it)\b/i.test(getElementActionText(el)));
+      const rejectEl = actions.find((el) => /\b(reject|decline|deny|manage|settings|customi[sz]e|no\s*thanks|necessary|essential|only)\b/i.test(getElementActionText(el)));
+      if (!acceptEl || !rejectEl || acceptEl === rejectEl) return;
+
+      const acceptWeight = buttonVisualWeight(acceptEl);
+      const rejectWeight = Math.max(1, buttonVisualWeight(rejectEl));
+      const ratio = acceptWeight / rejectWeight;
+      const rejectWeak = isWeaklyVisibleAction(rejectEl);
+      const isManipulative = ratio >= 1.6 || rejectWeak;
+      if (!isManipulative) return;
+
+      if (!bestFinding || ratio > bestFinding.ratio) {
+        bestFinding = { acceptEl, rejectEl, ratio, rejectWeak };
+      }
+    });
+
+    if (!bestFinding) return;
+
+    const confidence = Math.min(0.96, 0.7 + Math.min(0.2, (bestFinding.ratio - 1.0) * 0.09) + (bestFinding.rejectWeak ? 0.08 : 0));
+    const evidence = `Accept-vs-reject visual weight ratio: ${bestFinding.ratio.toFixed(2)}x${bestFinding.rejectWeak ? '; reject appears weak/hidden.' : '.'}`;
+    const existing = state.patterns.find((p) => p.type === 'misdirection' && /visual interference/i.test(p.name || ''));
+
+    if (!existing) {
+      state.patterns.push({
+        type: 'misdirection',
+        name: 'Visual Interference',
+        severity: (bestFinding.ratio >= 2.0 || bestFinding.rejectWeak) ? 'high' : 'medium',
+        confidence,
+        law: DARK_PATTERNS.misdirection.law,
+        penalty: DARK_PATTERNS.misdirection.penalty,
+        description: 'Acceptance path is visually emphasized over rejection in a consent-style UI.',
+        element: bestFinding.acceptEl,
+        text: evidence,
+      });
+    } else if ((existing.confidence || 0) < confidence) {
+      existing.confidence = confidence;
+      existing.text = evidence;
+      existing.element = bestFinding.acceptEl;
+    }
+
+    applyOverlay(bestFinding.acceptEl, 'manipulation', 'Visual Interference');
+    applyOverlay(bestFinding.rejectEl, 'manipulation', 'Visual Interference');
   }
 
   function getLabel(input) {
@@ -625,6 +747,149 @@
   // ═══════════════════════════════════════════════════════════════════════════
   // HELPERS
   // ═══════════════════════════════════════════════════════════════════════════
+
+  function normalizeScanText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isElementVisibleForDetection(el) {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (Number(style.opacity || 1) < 0.08) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width >= 24 && rect.height >= 12;
+  }
+
+  function getElementActionText(el) {
+    const aria = el.getAttribute?.('aria-label') || '';
+    const title = el.getAttribute?.('title') || '';
+    const text = el.innerText || el.textContent || '';
+    return normalizeScanText(`${aria} ${title} ${text}`);
+  }
+
+  function isTransparentColor(colorValue) {
+    if (!colorValue) return true;
+    const lower = String(colorValue).toLowerCase().trim();
+    return lower === 'transparent' || /rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0(?:\.0+)?\s*\)/.test(lower);
+  }
+
+  function buttonVisualWeight(el) {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    const area = Math.max(1, rect.width * rect.height);
+
+    const fontWeightRaw = parseInt(style.fontWeight, 10);
+    const fontFactor = Number.isFinite(fontWeightRaw)
+      ? 1 + Math.max(0, Math.min(0.45, (fontWeightRaw - 400) / 1000))
+      : 1;
+
+    const backgroundFactor = isTransparentColor(style.backgroundColor) ? 1 : 1.2;
+    const opacityFactor = Math.max(0.4, Math.min(1, Number(style.opacity || 1)));
+
+    return area * fontFactor * backgroundFactor * opacityFactor;
+  }
+
+  function isWeaklyVisibleAction(el) {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      Number(style.opacity || 1) < 0.6 ||
+      rect.width < 48 ||
+      rect.height < 20
+    );
+  }
+
+  function collectDarkPatternCandidates(bodyText) {
+    const selectors = [
+      'button',
+      'a',
+      'label',
+      '[role="button"]',
+      '[role="dialog"]',
+      'input[type="checkbox"]',
+      'input[type="radio"]',
+      '[aria-label]',
+      '[class*="cookie"]',
+      '[id*="cookie"]',
+      '[class*="consent"]',
+      '[id*="consent"]',
+      '.modal',
+      '.popup',
+    ];
+
+    const nodes = Array.from(document.querySelectorAll(selectors.join(', ')));
+    const candidates = [];
+    const seen = new Set();
+
+    nodes.forEach((el) => {
+      if (!isElementVisibleForDetection(el)) return;
+      const text = getElementActionText(el);
+      if (text.length < 8) return;
+      const dedupeKey = text.toLowerCase();
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
+
+      const hasConsentCue = /\b(cookie|consent|accept|reject|decline|allow|manage|settings|opt\s*out|unsubscribe|cancel|no\s*thanks)\b/i.test(text);
+      candidates.push({
+        text: text.slice(0, 260),
+        element: el,
+        contextScore: hasConsentCue ? 0.84 : 0.72,
+      });
+    });
+
+    const highSignalSentenceRegex = /\b(cookie|consent|accept|reject|decline|no\s*thanks|uncheck|untick|opt\s*out|newsletter|unsubscribe|allow|manage|settings|marketing|double\s*negative)\b/i;
+    const bodySentences = normalizeScanText(bodyText || '')
+      .split(/(?<=[.!?])\s+/)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length >= 20 && entry.length <= 180 && highSignalSentenceRegex.test(entry));
+
+    bodySentences.slice(0, 10).forEach((entry) => {
+      const dedupeKey = entry.toLowerCase();
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
+      candidates.push({
+        text: entry,
+        element: document.body,
+        contextScore: 0.68,
+      });
+    });
+
+    if (candidates.length === 0) {
+      const compactFallback = normalizeScanText(bodyText || '').slice(0, 220);
+      if (compactFallback) {
+        candidates.push({
+          text: compactFallback,
+          element: document.body,
+          contextScore: 0.58,
+        });
+      }
+    }
+
+    return candidates;
+  }
+
+  function findConsentContainers() {
+    const containerSelectors = [
+      '[role="dialog"]',
+      '[class*="cookie"]',
+      '[id*="cookie"]',
+      '[class*="consent"]',
+      '[id*="consent"]',
+      '.modal',
+      '.popup',
+    ];
+
+    return Array.from(document.querySelectorAll(containerSelectors.join(', ')))
+      .filter((el) => {
+        if (!isElementVisibleForDetection(el)) return false;
+        const text = normalizeScanText(el.textContent || '');
+        return /\b(cookie|consent|privacy|accept|reject|decline|manage|settings|preferences)\b/i.test(text);
+      })
+      .slice(0, 8);
+  }
 
   function findElementContaining(regex) {
     const walker = document.createTreeWalker(
