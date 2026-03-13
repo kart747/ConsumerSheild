@@ -283,23 +283,60 @@
 
   function detectTrackers() {
     const found = new Set();
-    const scripts = Array.from(document.querySelectorAll('script[src], iframe[src], img[src], link[href]'));
     const currentDomain = window.location.hostname;
 
-    scripts.forEach(el => {
+    // ─────────────────────────────────────────────────────────────────────
+    // SCAN 1: Explicit script[src] attribute scanning
+    // ─────────────────────────────────────────────────────────────────────
+    const scriptElements = Array.from(document.querySelectorAll('script[src]'));
+    scriptElements.forEach(scriptEl => {
+      const scriptSrc = scriptEl.src || '';
+      if (!scriptSrc) return;
+      KNOWN_TRACKERS.forEach(tracker => {
+        if (scriptSrc.includes(tracker.domain) && !found.has(tracker.domain)) {
+          found.add(tracker.domain);
+          state.trackers.push({ ...tracker, source: 'script[src]', url: scriptSrc });
+        }
+      });
+    });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // SCAN 2: Explicit iframe, img, link scanning
+    // ─────────────────────────────────────────────────────────────────────
+    const resourceElements = Array.from(document.querySelectorAll('iframe[src], img[src], link[href]'));
+    resourceElements.forEach(el => {
       const src = el.src || el.href || '';
       if (!src) return;
       KNOWN_TRACKERS.forEach(tracker => {
         if (src.includes(tracker.domain) && !found.has(tracker.domain)) {
           found.add(tracker.domain);
-          state.trackers.push({ ...tracker });
+          state.trackers.push({ ...tracker, source: 'resource_element', url: src });
         }
       });
     });
 
-    // Also check inline scripts for known tracker calls
-    const inlineScripts = Array.from(document.querySelectorAll('script:not([src])'));
-    const trackerKeywords = ['gtag(', 'ga(', 'fbq(', '_hsq.push', 'mixpanel.track', 'analytics.track', 'amplitude.getInstance'];
+    // ─────────────────────────────────────────────────────────────────────
+    // SCAN 3: Network requests via performance.getEntriesByType('resource')
+    // ─────────────────────────────────────────────────────────────────────
+    try {
+      const networkRequests = performance.getEntriesByType('resource');
+      networkRequests.forEach(req => {
+        const reqName = req.name || '';
+        KNOWN_TRACKERS.forEach(tracker => {
+          if (reqName.includes(tracker.domain) && !found.has(tracker.domain)) {
+            found.add(tracker.domain);
+            state.trackers.push({ ...tracker, source: 'network_request', url: reqName });
+          }
+        });
+      });
+    } catch {
+      // Performance API might be restricted; skip silently
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // SCAN 4: Inline scripts for known tracker calls
+    // ─────────────────────────────────────────────────────────────────────
+    const inlineScripts = Array.from(document.querySelectorAll('script:not([src]'));
     const trackerKeywordMap = {
       'gtag(': { domain: 'google-analytics.com', type: 'analytics', name: 'Google Analytics (inline)' },
       'ga(':   { domain: 'google-analytics.com', type: 'analytics', name: 'Google Analytics (legacy)' },
@@ -313,7 +350,7 @@
       Object.entries(trackerKeywordMap).forEach(([kw, tracker]) => {
         if (text.includes(kw) && !found.has(tracker.domain)) {
           found.add(tracker.domain);
-          state.trackers.push({ ...tracker });
+          state.trackers.push({ ...tracker, source: 'inline_script' });
         }
       });
     });
