@@ -1,0 +1,13 @@
+INFO:     Started server process [16922]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+[ConsumerShield] openai package not installed — using rule-based insights
+INFO:     127.0.0.1:47158 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47166 - "POST /analyze-complete HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47168 - "POST /analyze-privacy HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47178 - "POST /analyze-dark-patterns HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [16922]

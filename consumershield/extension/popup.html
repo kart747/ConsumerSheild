@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ConsumerShield</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+  <!-- ╔══ HEADER ══════════════════════════════════════════════╗ -->
+  <div class="header">
+    <div class="header-logo">🛡️</div>
+    <div class="header-text">
+      <h1>ConsumerShield</h1>
+      <p>Complete Consumer Protection</p>
+    </div>
+    <div class="header-scanning" id="scanning-indicator">
+      <div class="dot-pulse"></div>
+      <span>Scanning…</span>
+    </div>
+  </div>
+
+  <!-- ╔══ TAB BAR ═════════════════════════════════════════════╗ -->
+  <div class="tabbar">
+    <button class="tab active" data-tab="overview" id="tab-overview">
+      Overview
+    </button>
+    <button class="tab" data-tab="privacy" id="tab-privacy">
+      🔒 Privacy
+      <span class="tab-badge" id="badge-privacy">–</span>
+    </button>
+    <button class="tab" data-tab="manipulation" id="tab-manipulation">
+      ⚠️ Dark Patterns
+      <span class="tab-badge danger" id="badge-manipulation">–</span>
+    </button>
+  </div>
+
+  <!-- ╔══ OVERVIEW TAB ════════════════════════════════════════╗ -->
+  <div class="tab-content active" id="tab-content-overview">
+
+    <!-- Dual score cards -->
+    <div class="score-grid">
+      <div class="score-card privacy" id="card-privacy">
+        <div class="score-icon">🔒</div>
+        <div class="score-label">Privacy Risk</div>
+        <div class="score-value" id="score-privacy">–</div>
+        <div class="score-level" id="level-privacy">Scanning</div>
+      </div>
+      <div class="score-card manipulation" id="card-manipulation">
+        <div class="score-icon">💸</div>
+        <div class="score-label">Manipulation Risk</div>
+        <div class="score-value" id="score-manipulation">–</div>
+        <div class="score-level" id="level-manipulation">Scanning</div>
+      </div>
+    </div>
+
+    <!-- Overall risk gauge -->
+    <div class="overall-card" id="overall-card">
+      <div class="overall-header">
+        <span class="overall-label">Overall Risk</span>
+        <span class="overall-value" id="overall-value">–</span>
+        <span class="overall-level" id="overall-level">–</span>
+      </div>
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+      <p class="overall-insight" id="overall-insight">Analyzing this page…</p>
+    </div>
+
+    <!-- Quick Stats -->
+    <div class="stats-row">
+      <div class="stat-box">
+        <span class="stat-num" id="stat-trackers">–</span>
+        <span class="stat-lbl">Trackers</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-num" id="stat-patterns">–</span>
+        <span class="stat-lbl">Dark Patterns</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-num" id="stat-violations">–</span>
+        <span class="stat-lbl">Total Violations</span>
+      </div>
+    </div>
+
+    <!-- Laws cited -->
+    <div class="laws-section" id="laws-section" style="display:none">
+      <div class="laws-title">⚖️ Laws Implicated</div>
+      <div class="laws-list" id="laws-list"></div>
+    </div>
+
+  </div>
+
+  <!-- ╔══ PRIVACY TAB ═════════════════════════════════════════╗ -->
+  <div class="tab-content" id="tab-content-privacy">
+    <div class="section-header">🔍 Trackers Detected</div>
+    <div id="tracker-list" class="item-list">
+      <div class="empty-state">Scanning…</div>
+    </div>
+
+    <div class="section-header">📄 Privacy Policy Flags</div>
+    <div id="policy-list" class="item-list">
+      <div class="empty-state">Scanning…</div>
+    </div>
+
+    <div class="section-header">⚖️ Legal Exposure</div>
+    <div id="privacy-legal-list" class="item-list legal-list">
+      <div class="empty-state">None detected</div>
+    </div>
+  </div>
+
+  <!-- ╔══ MANIPULATION TAB ═══════════════════════════════════╗ -->
+  <div class="tab-content" id="tab-content-manipulation">
+    <div class="section-header">⚠️ Dark Patterns Found</div>
+    <div id="pattern-list" class="item-list">
+      <div class="empty-state">Scanning…</div>
+    </div>
+
+    <div class="section-header">⚖️ Legal Exposure</div>
+    <div id="manipulation-legal-list" class="item-list legal-list">
+      <div class="empty-state">None detected</div>
+    </div>
+  </div>
+
+  <!-- ╔══ ACTION BAR ══════════════════════════════════════════╗ -->
+  <div class="action-bar">
+    <button class="btn-secondary" id="btn-rescan">🔄 Rescan</button>
+    <button class="btn-primary" id="btn-report">📝 Generate Report</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
