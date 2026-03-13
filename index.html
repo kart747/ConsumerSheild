@@ -1,0 +1,1303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ConsumerShield — Security Analysis Report</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Reset & Base ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0B0E14;
+      --card:      #151A23;
+      --cyan:      #26A69A;
+      --violet:    #7B1FA2;
+      --blue:      #1976D2;
+      --red:       #D32F2F;
+      --orange:    #F57C00;
+      --yellow:    #FBC02D;
+      --text:      #E6EDF3;
+      --muted:     #8F9BB3;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      overflow-x: hidden;
+      min-height: 100vh;
+    }
+
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(0,242,255,.25); border-radius: 4px; }
+
+    /* ── Keyframes ────────────────────────────────────────────── */
+    @keyframes pulse-glow  { 0%,100%{opacity:.6;transform:scale(1)}  50%{opacity:1;transform:scale(1.04)} }
+    @keyframes critical-pulse { 0%,100%{box-shadow: 0 0 20px rgba(255,0,92,.3)} 50%{box-shadow: 0 0 40px rgba(255,0,92,.6), 0 0 60px rgba(255,0,92,.4)} }
+    @keyframes card-pulse  { 0%,100%{opacity:.3;box-shadow:none}       50%{opacity:.7;box-shadow:0 0 20px rgba(255,0,92,.25)} }
+    @keyframes blink       { 0%,100%{opacity:1}                        50%{opacity:.15} }
+    @keyframes fade-up     { from{opacity:0;transform:translateY(24px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes spin        { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+    @keyframes bar-grow    { from{width:0} to{width:var(--bar-w)} }
+
+    /* ── Cyber grid background ────────────────────────────────── */
+    #cyber-grid {
+      position: fixed; inset: 0;
+      pointer-events: none; z-index: 0; overflow: hidden;
+    }
+    #cyber-grid::before {
+      content: '';
+      position: absolute; inset: 0;
+      background-image:
+        linear-gradient(rgba(0,242,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,242,255,.025) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+    #cyber-grid::after {
+      content: '';
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(ellipse at top right,    rgba(112,0,255,.08) 0%, transparent 55%),
+        radial-gradient(ellipse at bottom left,  rgba(0,242,255,.06) 0%, transparent 55%),
+        repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,.06) 3px, rgba(0,0,0,.06) 4px);
+    }
+
+    /* ── Navigation ───────────────────────────────────────────── */
+    nav#main-nav {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(11,14,20,.88);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid rgba(255,255,255,.05);
+      padding: 0 40px;
+    }
+    .nav-inner {
+      max-width: 1160px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 64px;
+    }
+    .nav-links { display: flex; align-items: center; gap: 32px; }
+    .nav-links a {
+      font-size: 12px; color: var(--muted); text-decoration: none;
+      letter-spacing: .1em; padding: 6px 2px;
+      border-bottom: 1px solid transparent;
+      transition: color .2s, border-color .2s;
+    }
+    .nav-links a:hover, .nav-links a:focus-visible {
+      color: var(--cyan); border-bottom-color: rgba(0,242,255,.4);
+      outline: none;
+    }
+    .live-badge {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 10px; color: var(--red);
+      letter-spacing: .25em; text-transform: uppercase; font-weight: 600;
+    }
+    .live-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--red); box-shadow: 0 0 8px var(--red);
+      animation: blink 1.4s ease infinite;
+    }
+
+    /* ── Logo ─────────────────────────────────────────────────── */
+    .logo { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+    .logo-icon {
+      width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+      background: linear-gradient(135deg, rgba(0,242,255,.15), rgba(112,0,255,.15));
+      border: 1px solid rgba(0,242,255,.3);
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 16px rgba(0,242,255,.15);
+    }
+    .logo-text-main {
+      font-family: 'Exo 2', sans-serif; font-weight: 800;
+      font-size: 17px; letter-spacing: .06em; color: var(--text); line-height: 1;
+    }
+    .logo-text-main span { color: var(--cyan); }
+    .logo-text-sub {
+      font-size: 9px; letter-spacing: .25em; color: var(--muted);
+      text-transform: uppercase; margin-top: 2px;
+    }
+
+    /* ── Layout containers ────────────────────────────────────── */
+    .page-wrap { position: relative; z-index: 1; }
+    .container { max-width: 1160px; margin: 0 auto; padding: 0 40px; }
+
+    /* ── Hero ─────────────────────────────────────────────────── */
+    #overview { padding: 80px 40px 60px; }
+    .hero-row {
+      display: flex; align-items: flex-start;
+      justify-content: space-between; gap: 40px;
+      flex-wrap: wrap; margin-bottom: 56px;
+    }
+    .hero-left { 
+      flex: 1; 
+      min-width: 280px; 
+      flex-basis: 400px;
+      animation: fade-up .8s ease .1s both; 
+    }
+    .hero-right { 
+      flex-shrink: 0; 
+      width: 360px; 
+      max-width: 100%;
+      animation: fade-up .8s ease .25s both; 
+    }
+
+    .analysis-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 5px 14px; border-radius: 20px; margin-bottom: 24px;
+      background: rgba(0,242,255,.06); border: 1px solid rgba(0,242,255,.2);
+      font-size: 10px; color: var(--cyan);
+      letter-spacing: .3em; text-transform: uppercase; font-weight: 600;
+    }
+    .hero-title-1 {
+      font-family: 'Exo 2', sans-serif; font-weight: 800;
+      font-size: clamp(36px,5vw,58px); line-height: 1.05;
+      letter-spacing: -.03em; color: var(--text); margin-bottom: 8px;
+    }
+    .hero-title-2 {
+      font-family: 'Exo 2', sans-serif; font-weight: 800;
+      font-size: clamp(36px,5vw,58px); line-height: 1.05;
+      letter-spacing: -.03em; margin-bottom: 28px;
+      background: linear-gradient(135deg, var(--cyan) 0%, var(--violet) 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .meta-row { display: flex; align-items: center; gap: 10px; }
+    .meta-label { font-size: 13px; color: var(--muted); }
+    .meta-value { font-size: 13px; color: var(--cyan); font-weight: 600; }
+    .meta-time  { font-size: 13px; color: var(--muted); }
+    .meta-block { display: flex; flex-direction: column; gap: 10px; margin-bottom: 36px; }
+
+    /* ── Buttons ──────────────────────────────────────────────── */
+    .btn-group { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      gap: 8px; padding: 11px 24px; border-radius: 10px;
+      font-family: 'Exo 2', sans-serif; font-size: 13px; font-weight: 700;
+      letter-spacing: .08em; text-transform: uppercase;
+      border: none; cursor: pointer; line-height: 1;
+      white-space: nowrap; user-select: none;
+      transition: transform .18s ease, box-shadow .18s ease, background .18s ease, opacity .18s ease;
+    }
+    .btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary {
+      background: linear-gradient(135deg, #7B1FA2, #4A148C);
+      color: #fff;
+      box-shadow: 0 4px 20px rgba(112,0,255,.3);
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: linear-gradient(135deg, #8A1FFF, #5500DD);
+      box-shadow: 0 6px 28px rgba(112,0,255,.5);
+      transform: translateY(-2px);
+    }
+    .btn-primary:active:not(:disabled) { transform: translateY(1px) scale(.98); box-shadow: 0 2px 12px rgba(112,0,255,.3); }
+    .btn-outline {
+      background: transparent; color: var(--cyan);
+      border: 1px solid rgba(0,242,255,.35);
+      box-shadow: 0 0 16px rgba(0,242,255,.08);
+    }
+    .btn-outline:hover:not(:disabled) {
+      background: rgba(0,242,255,.08);
+      box-shadow: 0 0 24px rgba(0,242,255,.18), inset 0 0 12px rgba(0,242,255,.06);
+      transform: translateY(-2px);
+    }
+    .btn-outline:active:not(:disabled) { transform: translateY(1px) scale(.98); }
+    .btn svg.spin { animation: spin 1s linear infinite; }
+
+    /* ── Stat tiles ───────────────────────────────────────────── */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+    }
+    .stat-tile {
+      padding: 22px 24px; border-radius: 14px;
+      background: var(--card); border: 1px solid rgba(255,255,255,.05);
+      box-shadow: 0 4px 24px rgba(0,0,0,.3);
+      transition: border-color .25s, transform .25s, box-shadow .25s;
+    }
+    .stat-tile:hover {
+      border-color: rgba(0,242,255,.2);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 32px rgba(0,0,0,.4);
+    }
+    .stat-top  { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 12px; }
+    .stat-label{ font-size: 11px; color: var(--muted); letter-spacing: .1em; text-transform: uppercase; }
+    .stat-icon { font-size: 16px; opacity: .7; }
+    .stat-val  { font-family: 'Exo 2', sans-serif; font-size: 36px; font-weight: 800; line-height: 1; margin-bottom: 6px; }
+    .stat-sub  { font-size: 11px; color: var(--muted); }
+
+    /* ── Glass card ───────────────────────────────────────────── */
+    .glass-card {
+      background: var(--card);
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 18px;
+      backdrop-filter: blur(12px);
+      position: relative; overflow: hidden;
+      box-shadow: 0 8px 40px rgba(0,0,0,.4);
+    }
+
+    /* ── Score gauge card ─────────────────────────────────────── */
+    .gauge-card { 
+      padding: 32px 40px; 
+      text-align: center; 
+      border-color: rgba(0,242,255,.13); 
+      box-shadow: 0 0 0 1px rgba(0,242,255,.07), 0 8px 40px rgba(0,0,0,.4);
+      overflow: hidden;
+    }
+    .gauge-label { font-size: 10px; letter-spacing: .35em; color: var(--muted); text-transform: uppercase; margin-bottom: 24px; }
+    .gauge-wrap  { 
+      position: relative; 
+      width: 240px; 
+      height: 240px; 
+      margin: 0 auto;
+      overflow: visible;
+    }
+    .gauge-glow  {
+      position: absolute; inset: -8px; border-radius: 50%;
+      animation: pulse-glow 3s ease-in-out infinite;
+    }
+    #gauge-svg { transform: rotate(-225deg); position: relative; z-index: 1; display: block; }
+    .gauge-center {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding-top: 8px;
+    }
+    .gauge-score-display {
+      display: flex; align-items: baseline; justify-content: center; gap: 2px;
+      font-family: 'Exo 2', sans-serif; font-weight: 800;
+      font-size: 24px; line-height: 1;
+      margin-bottom: 4px;
+    }
+    .gauge-score-label {
+      font-size: 14px; color: var(--muted);
+      margin-right: 2px;
+    }
+    .gauge-score {
+      font-size: 32px;
+    }
+    .gauge-denom { 
+      font-size: 12px; color: var(--muted); 
+      letter-spacing: .1em; margin-left: 1px;
+    }
+    .gauge-risk-label {
+      margin-top: 6px; font-size: 8px; font-weight: 700;
+      letter-spacing: .15em; text-transform: uppercase;
+      padding: 2px 6px; border-radius: 10px; opacity: .9;
+      display: inline-block;
+      min-width: 60px;
+      max-width: 120px;
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .gauge-legend { display: flex; gap: 20px; justify-content: center; margin-top: 16px; }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-dot  { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .legend-text { font-size: 10px; color: var(--muted); letter-spacing: .1em; }
+
+    /* ── Sections ─────────────────────────────────────────────── */
+    .section-wrap { max-width: 1160px; margin: 0 auto; padding: 0 40px; }
+    .content-section { padding-bottom: 72px; opacity: 0; transform: translateY(32px); transition: opacity .7s ease, transform .7s ease; }
+    .content-section.visible { opacity: 1; transform: none; }
+    .last-section { padding-bottom: 96px; }
+
+    .section-eyebrow {
+      font-size: 10px; letter-spacing: .4em; text-transform: uppercase;
+      font-weight: 600; margin-bottom: 12px;
+    }
+    .section-title {
+      font-family: 'Exo 2', sans-serif; font-weight: 800;
+      font-size: clamp(26px,3.5vw,36px); line-height: 1.15;
+      color: var(--text); letter-spacing: -.02em; margin-bottom: 0;
+    }
+    .section-subtitle {
+      font-size: 14px; color: var(--muted); line-height: 1.7;
+      max-width: 520px; margin-top: 14px;
+    }
+    .section-header { margin-bottom: 40px; }
+
+    /* ── Dark pattern cards ───────────────────────────────────── */
+    .dark-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+      gap: 20px;
+    }
+    .dp-card {
+      border-radius: 14px; padding: 24px 28px;
+      position: relative; overflow: hidden;
+      opacity: 0; transform: translateY(28px);
+      transition: opacity .6s ease, transform .6s ease;
+    }
+    .dp-card.visible { opacity: 1; transform: translateY(0); }
+    .dp-card-pulse {
+      position: absolute; inset: -1px; border-radius: 14px;
+      animation: card-pulse 2.5s ease-in-out infinite;
+      pointer-events: none;
+    }
+    .dp-card-top {
+      display: flex; align-items: flex-start;
+      justify-content: space-between; gap: 16px; margin-bottom: 14px;
+    }
+    .dp-card-left { display: flex; align-items: center; gap: 12px; flex: 1; }
+    .dp-icon {
+      width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .dp-type { font-family: 'Exo 2', sans-serif; font-weight: 700; font-size: 15px; color: var(--text); line-height: 1.2; }
+    .dp-dpdp { font-size: 10px; color: var(--blue); letter-spacing: .15em; margin-top: 4px; font-weight: 600; }
+    .severity-badge {
+      flex-shrink: 0; padding: 4px 12px; border-radius: 20px;
+      font-size: 9px; font-weight: 700; letter-spacing: .25em; text-transform: uppercase;
+    }
+    .dp-desc { font-size: 13px; color: var(--muted); line-height: 1.75; }
+    .dp-bottom-line {
+      position: absolute; bottom: 0; left: 0; right: 0; height: 2px;
+      border-radius: 0 0 14px 14px; opacity: .6;
+    }
+
+    /* ── Tracker table ────────────────────────────────────────── */
+    .tracker-card-inner { padding: 28px 28px 12px; }
+    .tracker-head {
+      display: grid; grid-template-columns: 1fr auto auto;
+      padding: 0 20px 14px; gap: 20px;
+      border-bottom: 1px solid rgba(255,255,255,.05);
+      margin-bottom: 8px;
+    }
+    .tracker-head-cell { font-size: 10px; color: var(--muted); letter-spacing: .25em; text-transform: uppercase; }
+    .tracker-rows { display: flex; flex-direction: column; gap: 6px; padding-bottom: 16px; }
+    .tracker-row {
+      display: grid; grid-template-columns: 1fr auto auto;
+      align-items: center; gap: 20px;
+      padding: 16px 20px; border-radius: 10px;
+      background: rgba(255,255,255,.02);
+      border: 1px solid rgba(255,255,255,.05);
+      opacity: 0; transform: translateX(-20px);
+      transition: opacity .5s ease, transform .5s ease, background .2s;
+    }
+    .tracker-row.visible { opacity: 1; transform: translateX(0); }
+    .tracker-row:hover { background: rgba(255,255,255,.04); }
+    .tracker-name { font-family: 'Exo 2', sans-serif; font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+    .tracker-cat-row { display: flex; align-items: center; gap: 8px; }
+    .tracker-cat { font-size: 11px; color: var(--blue); letter-spacing: .1em; }
+    .tracker-bar-track { width: 80px; height: 3px; background: rgba(255,255,255,.06); border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+    .tracker-bar-fill { height: 100%; border-radius: 2px; width: 0; transition: width .8s cubic-bezier(.16,1,.3,1); }
+    .tracker-req { font-size: 12px; color: var(--muted); text-align: right; white-space: nowrap; }
+    .tracker-req span { font-size: 10px; opacity: .6; }
+    .risk-badge { padding: 4px 12px; border-radius: 20px; font-size: 9px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; }
+    .tracker-footer { padding: 16px 28px; border-top: 1px solid rgba(255,255,255,.05); background: rgba(45,91,255,.04); }
+    .tracker-footer p { font-size: 12px; color: var(--blue); line-height: 1.7; }
+
+    /* ── AI Analysis card ─────────────────────────────────────── */
+    .ai-card { padding: 36px 40px; border-color: rgba(112,0,255,.13); box-shadow: 0 0 0 1px rgba(112,0,255,.07), 0 8px 40px rgba(0,0,0,.4); }
+    .ai-header { display: flex; align-items: center; gap: 16px; margin-bottom: 28px; padding-bottom: 24px; border-bottom: 1px solid rgba(255,255,255,.05); }
+    .ai-icon {
+      width: 48px; height: 48px; border-radius: 14px; flex-shrink: 0;
+      background: linear-gradient(135deg, rgba(112,0,255,.2), rgba(0,242,255,.1));
+      border: 1px solid rgba(112,0,255,.3);
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 20px rgba(112,0,255,.2);
+    }
+    .ai-title { font-family: 'Exo 2', sans-serif; font-size: 15px; font-weight: 700; color: var(--text); }
+    .ai-sub { font-size: 11px; color: var(--violet); letter-spacing: .15em; margin-top: 3px; }
+    .ai-text { font-size: 14px; color: var(--muted); line-height: 1.9; border-left: 2px solid rgba(112,0,255,.4); padding-left: 20px; margin-bottom: 28px; }
+    .ai-findings { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap: 14px; }
+    .ai-finding {
+      padding: 14px 18px; border-radius: 10px;
+      background: rgba(112,0,255,.06); border: 1px solid rgba(112,0,255,.12);
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .ai-finding-label { font-size: 12px; color: var(--muted); line-height: 1.4; }
+    .ai-finding-score { font-size: 10px; font-weight: 700; letter-spacing: .15em; flex-shrink: 0; text-transform: uppercase; }
+
+    /* ── Legal mapping ────────────────────────────────────────── */
+    .act-badge {
+      display: inline-flex; align-items: center; gap: 10px;
+      margin-bottom: 32px; padding: 10px 20px; border-radius: 10px;
+      background: rgba(45,91,255,.08); border: 1px solid rgba(45,91,255,.2);
+    }
+    .act-badge span { font-size: 12px; color: var(--blue); font-weight: 600; letter-spacing: .1em; }
+    .legal-list { display: flex; flex-direction: column; gap: 14px; }
+    .legal-card {
+      padding: 20px 24px; border-radius: 12px;
+      position: relative; overflow: hidden;
+      opacity: 0; transform: translateY(20px);
+      transition: opacity .55s ease, transform .55s ease;
+    }
+    .legal-card.visible { opacity: 1; transform: translateY(0); }
+    .legal-inner { display: flex; align-items: flex-start; gap: 14px; }
+    .legal-icon {
+      width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .legal-meta { flex: 1; }
+    .legal-tags { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+    .legal-section-label { font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; }
+    .legal-tag { font-size: 9px; padding: 2px 8px; border-radius: 20px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; }
+    .legal-title { font-family: 'Exo 2', sans-serif; font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+    .legal-desc { font-size: 12px; color: var(--muted); line-height: 1.7; }
+    .disclaimer { margin-top: 32px; padding: 18px 24px; border-radius: 10px; background: rgba(255,255,255,.02); border: 1px solid rgba(255,255,255,.05); }
+    .disclaimer p { font-size: 11px; color: var(--muted); line-height: 1.75; }
+
+    /* ── Wall of Shame ─────────────────────────────────────────── */
+    .shame-header { display: flex; align-items: center; gap: 16px; margin-bottom: 32px; }
+    .shame-icon {
+      width: 48px; height: 48px; border-radius: 14px; flex-shrink: 0;
+      background: linear-gradient(135deg, rgba(255,0,92,.2), rgba(255,122,0,.1));
+      border: 1px solid rgba(255,0,92,.3);
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 20px rgba(255,0,92,.2);
+    }
+    .shame-title { font-family: 'Exo 2', sans-serif; font-size: 15px; font-weight: 700; color: var(--text); }
+    .shame-sub { font-size: 11px; color: var(--red); letter-spacing: .15em; margin-top: 3px; }
+
+    .top-five-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 40px; }
+    .top-five-card {
+      padding: 20px 24px; border-radius: 14px;
+      background: rgba(255,0,92,.06); border: 1px solid rgba(255,0,92,.2);
+      position: relative; overflow: hidden;
+      opacity: 0; transform: translateY(24px);
+      transition: opacity .6s ease, transform .6s ease, border-color .25s, box-shadow .25s;
+    }
+    .top-five-card.visible { opacity: 1; transform: translateY(0); }
+    .top-five-card:hover {
+      border-color: rgba(255,0,92,.4);
+      box-shadow: 0 8px 32px rgba(255,0,92,.15);
+    }
+    .top-five-rank {
+      position: absolute; top: 16px; right: 16px;
+      width: 32px; height: 32px; border-radius: 50%;
+      background: linear-gradient(135deg, #D32F2F, #B71C1C);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 800; color: white;
+      box-shadow: 0 4px 12px rgba(255,0,92,.3);
+    }
+    .top-five-content { padding-right: 40px; }
+    .top-five-url {
+      font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 600;
+      color: var(--text); margin-bottom: 8px;
+      text-decoration: none; color: var(--text);
+    }
+    .top-five-url:hover { color: var(--cyan); }
+    .top-five-meta { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+    .top-five-score {
+      font-size: 20px; font-weight: 800; color: var(--red);
+      text-shadow: 0 0 16px rgba(255,0,92,.4);
+    }
+    .top-five-reports {
+      font-size: 12px; color: var(--muted);
+      display: flex; align-items: center; gap: 4px;
+    }
+    .top-five-patterns {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      font-size: 10px; color: var(--muted); letter-spacing: .05em;
+    }
+    .pattern-tag {
+      padding: 2px 8px; border-radius: 12px;
+      background: rgba(255,0,92,.1); border: 1px solid rgba(255,0,92,.2);
+      color: var(--red); font-weight: 600;
+    }
+
+    .full-shame-list { display: flex; flex-direction: column; gap: 12px; }
+    .shame-row {
+      display: grid; grid-template-columns: 2fr 1fr 1fr 2fr 1fr;
+      align-items: center; gap: 20px;
+      padding: 16px 24px; border-radius: 12px;
+      background: rgba(255,0,92,.04); border: 1px solid rgba(255,0,92,.15);
+      opacity: 0; transform: translateX(-24px);
+      transition: opacity .5s ease, transform .5s ease, background .2s;
+    }
+    .shame-row.visible { opacity: 1; transform: translateX(0); }
+    .shame-row:hover { background: rgba(255,0,92,.08); }
+    .shame-url {
+      font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600;
+      color: var(--text); text-decoration: none;
+    }
+    .shame-url:hover { color: var(--cyan); }
+    .shame-score {
+      font-size: 16px; font-weight: 700; color: var(--red);
+      text-align: center;
+    }
+    .shame-reports {
+      font-size: 13px; color: var(--muted);
+      text-align: center; display: flex; align-items: center; justify-content: center; gap: 4px;
+    }
+    .shame-patterns {
+      display: flex; flex-wrap: wrap; gap: 4px;
+      font-size: 10px;
+    }
+    .shame-pattern-tag {
+      padding: 2px 6px; border-radius: 8px;
+      background: rgba(255,0,92,.15); color: var(--red);
+      font-weight: 600; letter-spacing: .02em;
+    }
+    .shame-date {
+      font-size: 11px; color: var(--muted);
+      text-align: right;
+    }
+
+    .shame-disclaimer {
+      margin-top: 32px; padding: 18px 24px; border-radius: 10px;
+      background: rgba(255,0,92,.04); border: 1px solid rgba(255,0,92,.15);
+    }
+    .shame-disclaimer p {
+      font-size: 11px; color: var(--muted); line-height: 1.75;
+    }
+
+    /* ── Footer ───────────────────────────────────────────────── */
+    footer {
+      position: relative; z-index: 1;
+      border-top: 1px solid rgba(255,255,255,.05);
+      background: rgba(11,14,20,.92); padding: 40px;
+    }
+    .footer-inner {
+      max-width: 1160px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 20px;
+    }
+    .footer-copy { font-size: 11px; color: var(--muted); }
+
+    /* ── Responsive ───────────────────────────────────────────── */
+    @media (max-width: 768px) {
+      nav#main-nav { padding: 0 20px; }
+      .nav-links { display: none; }
+      #overview  { padding: 60px 20px 40px; }
+      .hero-row  { flex-direction: column; }
+      .hero-right{ align-self: center; width: 100%; max-width: 360px; }
+      .btn-group { flex-direction: column; width: 100%; }
+      .btn-group .btn { width: 100%; justify-content: center; }
+      .dark-grid { grid-template-columns: 1fr !important; }
+      .section-wrap { padding: 0 20px; }
+      .gauge-card { padding: 32px 24px; }
+      .top-five-grid { grid-template-columns: 1fr !important; }
+      .shame-row { grid-template-columns: 1fr !important; gap: 8px !important; }
+      .shame-row > * { text-align: left !important; }
+      .shame-score, .shame-reports, .shame-date { font-size: 12px !important; margin-top: 4px !important; }
+    }
+    @media (max-width: 480px) {
+      .tracker-head { display: none; }
+      .tracker-row  { grid-template-columns: 1fr auto; }
+      .tracker-row .risk-badge { display: none; }
+      .footer-inner { flex-direction: column; align-items: flex-start; }
+      .top-five-content { padding-right: 0 !important; }
+      .top-five-rank { position: static !important; align-self: flex-start; margin-bottom: 8px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Cyber grid background -->
+<div id="cyber-grid" aria-hidden="true"></div>
+
+<div class="page-wrap">
+
+  <!-- ── Navigation ─────────────────────────────────────────── -->
+  <nav id="main-nav" role="navigation" aria-label="Main navigation">
+    <div class="nav-inner">
+      <a href="#overview" class="logo" aria-label="ConsumerShield home">
+        <div class="logo-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 2L3 7v5c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" fill="rgba(38,166,154,.2)" stroke="#26A69A" stroke-width="1.5" stroke-linejoin="round"/>
+            <path d="M9 12l2 2 4-4" stroke="#26A69A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div>
+          <div class="logo-text-main">Consumer<span>Shield</span></div>
+          <div class="logo-text-sub">Digital Protection</div>
+        </div>
+      </a>
+
+      <div class="nav-links">
+        <a href="#overview">Overview</a>
+        <a href="#dark-patterns">Dark Patterns</a>
+        <a href="#trackers">Trackers</a>
+        <a href="#ai-analysis">AI Analysis</a>
+        <a href="#legal">Legal</a>
+        <a href="#wall-of-shame">Wall of Shame</a>
+      </div>
+
+      <div class="live-badge" role="status" aria-live="polite" aria-label="Live scan active">
+        <div class="live-dot" aria-hidden="true"></div>
+        Live Scan
+      </div>
+    </div>
+  </nav>
+
+  <!-- ── Hero / Overview ────────────────────────────────────── -->
+  <section id="overview" aria-label="Report overview">
+    <div class="hero-row" style="max-width:1160px;margin:0 auto;">
+
+      <!-- Left: headline + meta + CTAs -->
+      <div class="hero-left">
+        <div class="analysis-badge">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="#26A69A" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg>
+          Analysis Complete
+        </div>
+        <h1 class="hero-title-1">Security Analysis</h1>
+        <h1 class="hero-title-2">Report</h1>
+
+        <div class="meta-block">
+          <div class="meta-row">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8F9BB3" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20"/></svg>
+            <span class="meta-label">Target:</span>
+            <span class="meta-value" id="meta-site">flipkart.com</span>
+          </div>
+          <div class="meta-row">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8F9BB3" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <time class="meta-time" id="meta-time">2025-07-14 · 09:42:33 IST</time>
+          </div>
+        </div>
+
+        <div class="btn-group">
+          <button type="button" class="btn btn-primary" id="btn-export" aria-label="Export security report as a text file">
+            <svg id="export-icon-dl" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <svg id="export-icon-spin" class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="display:none">
+              <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/>
+            </svg>
+            <svg id="export-icon-ok" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="display:none">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+            <span id="export-label">Export Report</span>
+          </button>
+
+          <button type="button" class="btn btn-outline" id="btn-rescan" aria-label="Rescan the website">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/>
+            </svg>
+            Rescan
+          </button>
+        </div>
+      </div>
+
+      <!-- Right: score gauge -->
+      <div class="hero-right">
+        <div class="glass-card gauge-card">
+          <div class="gauge-label">Security Score</div>
+          <div class="gauge-wrap">
+            <div class="gauge-glow" id="gauge-glow" aria-hidden="true"></div>
+            <svg id="gauge-svg" width="240" height="240" viewBox="0 0 240 240" role="img" aria-label="Security score: 4 out of 10">
+              <!-- Track -->
+              <circle id="gauge-track" cx="120" cy="120" r="88" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="12" stroke-linecap="round"/>
+              <!-- Ticks (rendered by JS) -->
+              <g id="gauge-ticks"></g>
+              <!-- Progress arc -->
+              <circle id="gauge-arc" cx="120" cy="120" r="88" fill="none" stroke-width="12" stroke-linecap="round"/>
+            </svg>
+            <div class="gauge-center">
+              <div class="gauge-score-display">
+                <span class="gauge-score-label">Score:</span>
+                <span class="gauge-score" id="gauge-score-num">0</span>
+                <span class="gauge-denom">/ 10</span>
+              </div>
+              <div class="gauge-risk-label" id="gauge-risk-label"></div>
+            </div>
+          </div>
+          <div class="gauge-legend" role="list" aria-label="Score colour legend">
+            <div class="legend-item" role="listitem"><div class="legend-dot" style="background:#4CAF50;box-shadow:0 0 6px #4CAF50"></div><span class="legend-text">Secure</span></div>
+            <div class="legend-item" role="listitem"><div class="legend-dot" style="background:#FFC107;box-shadow:0 0 6px #FFC107"></div><span class="legend-text">Moderate</span></div>
+            <div class="legend-item" role="listitem"><div class="legend-dot" style="background:#FF5722;box-shadow:0 0 6px #FF5722"></div><span class="legend-text">High Risk</span></div>
+            <div class="legend-item" role="listitem"><div class="legend-dot" style="background:#F44336;box-shadow:0 0 6px #F44336"></div><span class="legend-text">Critical</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+</div>
+
+    <!-- Stat tiles -->
+    <div class="stat-grid" style="max-width:1160px;margin:0 auto;" id="stat-grid"></div>
+  </section>
+
+  <div class="section-wrap">
+
+    <!-- ── Dark Patterns ──────────────────────────────────────── -->
+    <section id="dark-patterns" class="content-section" aria-label="Detected dark patterns">
+      <header class="section-header">
+        <div class="section-eyebrow" style="color:#D32F2F">    </div>
+        <h2 class="section-title">Dark Patterns <span style="color:#D32F2F">Identified</span></h2>
+        <p class="section-subtitle">Manipulative design elements engineered to override informed decision-making and exploit cognitive vulnerabilities.</p>
+      </header>
+      <div class="dark-grid" id="dark-pattern-grid"></div>
+    </section>
+
+    <!-- ── Privacy Trackers ───────────────────────────────────── -->
+    <section id="trackers" class="content-section" aria-label="Privacy trackers">
+      <header class="section-header">
+          <h2 class="section-title">Privacy <span style="color:#1976D2">Trackers</span></h2>
+        <p class="section-subtitle">Third-party scripts and tracking pixels detected during page load. All flagged under DPDP Act data minimisation obligations.</p>
+      </header>
+      <div class="glass-card" style="border-color:rgba(45,91,255,.13);box-shadow:0 0 0 1px rgba(45,91,255,.07),0 8px 40px rgba(0,0,0,.4)">
+        <div class="tracker-card-inner">
+          <div class="tracker-head">
+            <div class="tracker-head-cell">Tracker / Category</div>
+            <div class="tracker-head-cell">Requests</div>
+            <div class="tracker-head-cell">Risk</div>
+          </div>
+          <div class="tracker-rows" id="tracker-rows"></div>
+        </div>
+        <div class="tracker-footer">
+          <p><strong>DPDP Act Reference:</strong> Under Section 7(b), data fiduciaries must collect only the minimum personal data necessary for stated purposes. The trackers above may constitute excess collection.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── AI Analysis ────────────────────────────────────────── -->
+    <section id="ai-analysis" class="content-section" aria-label="AI threat analysis">
+      <header class="section-header">
+         <h2 class="section-title">AI Threat <span style="color:#7B1FA2">Analysis</span></h2>
+      </header>
+      <div class="glass-card ai-card">
+        <div class="ai-header">
+          <div class="ai-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 2a10 10 0 100 20A10 10 0 0012 2z" stroke="#7B1FA2" stroke-width="1.5"/>
+              <path d="M12 8v4M12 16h.01" stroke="#7B1FA2" stroke-width="1.5" stroke-linecap="round"/>
+              <circle cx="12" cy="12" r="3" fill="rgba(112,0,255,.2)"/>
+            </svg>
+          </div>
+          <div>
+            <div class="ai-title">Behavioural Pattern Analysis</div>
+            <div class="ai-sub">CONSUMERSHIELD AI · CONFIDENCE: 94%</div>
+          </div>
+        </div>
+        <p class="ai-text" id="ai-text"></p>
+        <div class="ai-findings" id="ai-findings"></div>
+      </div>
+    </section>
+
+    <!-- ── Legal Mapping ──────────────────────────────────────── -->
+    <section id="legal" class="content-section last-section" aria-label="Legal compliance mapping">
+      <header class="section-header">
+         <h2 class="section-title">Regulatory <span style="color:#1976D2">Compliance Map</span></h2>
+        <p class="section-subtitle">Findings mapped to the Digital Personal Data Protection Act 2023. Sections at risk of non-compliance are flagged for legal review.</p>
+      </header>
+
+      <div class="act-badge">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="#1976D2" stroke-width="1.5"/>
+          <polyline points="14 2 14 8 20 8" stroke="#2D5BFF" stroke-width="1.5"/>
+          <line x1="16" y1="13" x2="8" y2="13" stroke="#2D5BFF" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="16" y1="17" x2="8" y2="17" stroke="#2D5BFF" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span>Digital Personal Data Protection Act, 2023 · Ministry of Electronics and IT, Government of India</span>
+      </div>
+
+      <div class="legal-list" id="legal-list"></div>
+
+      <div class="disclaimer">
+        <p><strong style="color:var(--text)">Disclaimer:</strong> This mapping is generated by ConsumerShield's AI engine for informational purposes only. It does not constitute legal advice. Findings should be reviewed by a qualified legal professional before any regulatory action is taken.</p>
+      </div>
+    </section>
+
+    <!-- ── Wall of Shame ───────────────────────────────────────── -->
+    <section id="wall-of-shame" class="content-section last-section" aria-label="Wall of Shame - Most reported dark pattern websites">
+      <header class="section-header">
+         <h2 class="section-title">Wall of Shame <span style="color:#D32F2F">— Most Reported</span></h2>
+        <p class="section-subtitle">Websites frequently reported by ConsumerShield users for deploying manipulative dark patterns. Community-driven transparency for digital rights protection.</p>
+      </header>
+
+      <div class="shame-header">
+        <div class="shame-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" stroke="#D32F2F" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div>
+          <div class="shame-title">Community-Powered Transparency</div>
+          <div class="shame-sub">CONSUMERSHIELD USER REPORTS</div>
+        </div>
+      </div>
+
+      <!-- Top 5 Most Reported -->
+      <div class="top-five-grid" id="top-five-grid"></div>
+
+      <!-- Full Shame List -->
+      <div class="glass-card" style="border-color:rgba(255,0,92,.13);box-shadow:0 0 0 1px rgba(255,0,92,.07),0 8px 40px rgba(0,0,0,.4)">
+        <div class="tracker-card-inner">
+          <div class="tracker-head">
+            <div class="tracker-head-cell">Website</div>
+            <div class="tracker-head-cell">Risk Score</div>
+            <div class="tracker-head-cell">Reports</div>
+            <div class="tracker-head-cell">Dark Patterns</div>
+            <div class="tracker-head-cell">Last Reported</div>
+          </div>
+          <div class="full-shame-list" id="full-shame-list"></div>
+        </div>
+        <div class="tracker-footer" style="background: rgba(255,0,92,.04);">
+          <p><strong>DPDP Act Reference:</strong> Community reports help identify systemic violations of consumer protection laws. Websites with high dark pattern deployment may face regulatory scrutiny under Section 43A of the Information Technology Act, 2000.</p>
+        </div>
+      </div>
+
+      <div class="shame-disclaimer">
+        <p><strong style="color:var(--text)">Community Reporting:</strong> This data is aggregated from ConsumerShield extension users who voluntarily report manipulative design patterns. Reports are anonymized and aggregated to protect user privacy while promoting digital transparency.</p>
+      </div>
+    </section>
+
+  </div><!-- /.section-wrap -->
+</div><!-- /.page-wrap -->
+
+<!-- ── Footer ─────────────────────────────────────────────────── -->
+<footer>
+  <div class="footer-inner">
+    <a href="#overview" class="logo" aria-label="ConsumerShield home">
+      <div class="logo-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 2L3 7v5c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z" fill="rgba(0,242,255,.2)" stroke="#00F2FF" stroke-width="1.5" stroke-linejoin="round"/>
+          <path d="M9 12l2 2 4-4" stroke="#00F2FF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div>
+        <div class="logo-text-main">Consumer<span>Shield</span></div>
+        <div class="logo-text-sub">Digital Protection</div>
+      </div>
+    </a>
+    <p class="footer-copy">Powered by ConsumerShield AI Engine · DPDP Act 2023 Compliance Module</p>
+    <p class="footer-copy">© 2025 ConsumerShield · All data processed locally</p>
+  </div>
+</footer>
+
+<script>
+/* ── Report data ──────────────────────────────────────────────── */
+const REPORT = {
+  site: "flipkart.com",
+  timestamp: "2026-03-13 · 20:14:33 IST",
+  securityScore: 7,
+  darkPatterns: [
+    { id:1, type:"False Urgency",        description:"Countdown timer displayed on product pages with no real deadline. Resets on page reload, artificially pressuring users into immediate purchases.",              severity:"critical", dpdpRef:"Section 7(b)" },
+    { id:2, type:"Hidden Subscription",  description:"Flipkart Plus membership silently pre-selected during checkout flow. Opt-out is buried two screens deep in account settings.",                               severity:"high",     dpdpRef:"Section 6(1)" },
+    { id:3, type:"Confirm-shaming",      description:"Decline button reads 'No, I don't want savings' — designed to invoke shame and override rational decision-making.",                                          severity:"medium",   dpdpRef:"Section 7(a)" },
+    { id:4, type:"Roach Motel",          description:"Account sign-up is frictionless. Account deletion requires email verification, OTP, 7-day waiting period, and manual review.",                              severity:"critical", dpdpRef:"Section 12(3)" },
+  ],
+  trackers: [
+    { name:"Google Analytics (GA4)",    category:"Behavioral Analytics", risk:"high",     requests:47 },
+    { name:"Meta Pixel",                category:"Cross-site Tracking",  risk:"critical", requests:31 },
+    { name:"Hotjar Session Recording",  category:"Session Replay",       risk:"high",     requests:18 },
+    { name:"Criteo Ad Retargeting",     category:"Ad Targeting",         risk:"medium",   requests:12 },
+    { name:"DoubleClick (Google)",      category:"Ad Profiling",         risk:"medium",   requests:9  },
+  ],
+  aiAnalysis: "Our analysis of flipkart.com reveals a systemic deployment of behaviorally-informed dark patterns engineered to suppress informed consent and inflate conversion metrics at the user's expense. The false urgency mechanisms exploit temporal discounting biases — a well-documented cognitive vulnerability — to manufacture perceived scarcity where none exists. The pre-selected membership enrollment violates the foundational principle of granular, uninstructed consent as codified in the DPDP Act 2023. Critically, the asymmetry between account creation (3 steps) and deletion (11 steps) constitutes a structural barrier to data erasure rights. Cross-site tracking via Meta Pixel and Google Analytics creates persistent behavioral profiles without explicit disclosure at the point of collection, exposing the platform to significant regulatory liability under DPDP Schedule I.",
+  legalMappings: [
+    { section:"Section 6(1)",  title:"Consent Requirements",       description:"Pre-selected checkboxes for Flipkart Plus constitute implied rather than explicit consent.",                                  risk:"violation" },
+    { section:"Section 7(a)",  title:"Purpose Limitation",         description:"Session recordings via Hotjar collected beyond declared purpose of 'performance analytics.'",                                risk:"violation" },
+    { section:"Section 7(b)",  title:"Data Minimisation",          description:"47 GA4 requests per session suggests excessive telemetry collection beyond stated need.",                                    risk:"risk"      },
+    { section:"Section 12(3)", title:"Right to Erasure",           description:"Multi-step deletion process with mandatory 7-day delay potentially contravenes timely erasure obligations.",                risk:"violation" },
+    { section:"Section 16",    title:"Significant Data Fiduciary", description:"Volume and sensitivity of data processed may trigger enhanced obligations under Schedule I.",                               risk:"risk"      },
+  ],
+  wallOfShame: [
+    { url:"amazon.in",         riskScore:95, reportsThisWeek:1247, darkPatterns:["False Urgency","Hidden Subscription","Confirm-shaming","Roach Motel"], lastReported:"2025-07-14" },
+    { url:"flipkart.com",      riskScore:92, reportsThisWeek:987,  darkPatterns:["False Urgency","Hidden Subscription","Confirm-shaming"], lastReported:"2025-07-14" },
+    { url:"myntra.com",        riskScore:88, reportsThisWeek:756,  darkPatterns:["False Urgency","Confirm-shaming","Roach Motel"], lastReported:"2025-07-13" },
+    { url:"swiggy.com",        riskScore:85, reportsThisWeek:643,  darkPatterns:["False Urgency","Hidden Subscription"], lastReported:"2025-07-13" },
+    { url:"zomato.com",        riskScore:82, reportsThisWeek:598,  darkPatterns:["False Urgency","Confirm-shaming"], lastReported:"2025-07-12" },
+    { url:"bookmyshow.com",    riskScore:78, reportsThisWeek:432,  darkPatterns:["False Urgency","Roach Motel"], lastReported:"2025-07-12" },
+    { url:"makemytrip.com",    riskScore:75, reportsThisWeek:387,  darkPatterns:["Confirm-shaming","Hidden Subscription"], lastReported:"2025-07-11" },
+    { url:"redbus.in",         riskScore:72, reportsThisWeek:298,  darkPatterns:["False Urgency"], lastReported:"2025-07-11" },
+    { url:"ola.com",           riskScore:68, reportsThisWeek:234,  darkPatterns:["Confirm-shaming"], lastReported:"2025-07-10" },
+    { url:"paytm.com",         riskScore:65, reportsThisWeek:198,  darkPatterns:["Roach Motel"], lastReported:"2025-07-10" },
+  ],
+};
+
+/* ── Color helpers ────────────────────────────────────────────── */
+function scoreConfig(s) {
+  // Score is already on 0-10 scale
+  const score = Math.min(10, Math.max(0, s));
+  
+  if (score <= 2) return { color:"#4CAF50", glow:"rgba(76,175,80,.4)",  label:"SECURE",        level:"Secure"        };
+  if (score <= 5) return { color:"#FFC107", glow:"rgba(255,193,7,.4)",  label:"MODERATE RISK", level:"Moderate Risk" };
+  if (score <= 8) return { color:"#FF5722", glow:"rgba(255,87,34,.4)",  label:"HIGH RISK",     level:"High Risk"     };
+  return             { color:"#F44336", glow:"rgba(244,67,54,.4)",   label:"CRITICAL RISK", level:"Critical Risk" };
+}
+function sevConfig(sev) {
+  return ({ critical:{ color:"#D32F2F", bg:"rgba(211,47,47,.08)",  border:"rgba(211,47,47,.35)",  label:"CRITICAL", pulse:true  },
+             high:    { color:"#F57C00", bg:"rgba(245,124,0,.08)", border:"rgba(245,124,0,.35)", label:"HIGH",     pulse:false },
+             medium:  { color:"#FBC02D", bg:"rgba(251,192,45,.08)", border:"rgba(251,192,45,.25)", label:"MEDIUM",   pulse:false },
+             low:     { color:"#26A69A", bg:"rgba(38,166,154,.06)", border:"rgba(38,166,154,.2)",  label:"LOW",      pulse:false },
+           }[sev] || { color:"#26A69A", bg:"rgba(38,166,154,.06)", border:"rgba(38,166,154,.2)", label:"LOW", pulse:false });
+}
+function riskConfig(r) {
+  return ({ critical:{ color:"#D32F2F", bg:"rgba(211,47,47,.12)"  },
+             high:    { color:"#F57C00", bg:"rgba(245,124,0,.12)" },
+             medium:  { color:"#FBC02D", bg:"rgba(251,192,45,.12)" },
+           }[r] || { color:"#FBC02D", bg:"rgba(251,192,45,.12)" });
+}
+
+/* ── Gauge ────────────────────────────────────────────────────── */
+function initGauge() {
+  const originalScore = REPORT.securityScore;
+  const score = Math.min(10, Math.max(0, originalScore)); // Score is already 0-10
+  const cfg = scoreConfig(originalScore);
+  const R = 88;
+  const C = 2 * Math.PI * R;
+
+  /* glow */
+  const glow = document.getElementById('gauge-glow');
+  glow.style.background = `radial-gradient(circle, ${cfg.glow} 0%, transparent 70%)`;
+
+  /* Add pulsing animation for critical risk */
+  if (score >= 9) {
+    glow.style.animation = 'pulse-glow 3s ease-in-out infinite, critical-pulse 1.5s ease-in-out infinite';
+  } else {
+    glow.style.animation = 'pulse-glow 3s ease-in-out infinite';
+  }
+
+  /* track dash */
+  const track = document.getElementById('gauge-track');
+  track.setAttribute('stroke-dasharray', `${C * 0.75} ${C}`);
+
+  /* ticks */
+  const tickG = document.getElementById('gauge-ticks');
+  for (let i = 0; i <= 10; i++) {
+    const a = (i / 10) * 0.75 * 2 * Math.PI;
+    const x1 = 120 + (R - 18) * Math.cos(a), y1 = 120 + (R - 18) * Math.sin(a);
+    const x2 = 120 + (R - 8) * Math.cos(a), y2 = 120 + (R - 8) * Math.sin(a);
+    const line = document.createElementNS("http://www.w3.org/2000/svg","line");
+    line.setAttribute('x1',x1); line.setAttribute('y1',y1);
+    line.setAttribute('x2',x2); line.setAttribute('y2',y2);
+    line.setAttribute('stroke','rgba(255,255,255,.12)');
+    line.setAttribute('stroke-width', i % 5 === 0 ? 2 : 1);
+    line.setAttribute('stroke-linecap','round');
+    tickG.appendChild(line);
+  }
+
+  /* progress arc */
+  const arc = document.getElementById('gauge-arc');
+  arc.setAttribute('stroke', cfg.color);
+  arc.style.filter = `drop-shadow(0 0 8px ${cfg.color}) drop-shadow(0 0 16px ${cfg.glow})`;
+
+  /* labels */
+  const scoreLabelEl = document.querySelector('.gauge-score-label');
+  const scoreEl = document.getElementById('gauge-score-num');
+  const denomEl = document.querySelector('.gauge-denom');
+  const riskEl = document.getElementById('gauge-risk-label');
+  
+  if (scoreLabelEl) {
+    scoreLabelEl.style.color = cfg.color;
+    scoreLabelEl.style.textShadow = `0 0 10px ${cfg.glow}`;
+  }
+  scoreEl.style.color = cfg.color;
+  scoreEl.style.textShadow = `0 0 20px ${cfg.glow}, 0 0 40px ${cfg.glow}`;
+  if (denomEl) {
+    denomEl.style.color = cfg.color;
+    denomEl.style.textShadow = `0 0 10px ${cfg.glow}`;
+  }
+  
+  riskEl.textContent = cfg.level;
+  riskEl.style.color = cfg.color;
+  riskEl.style.border = `1px solid ${cfg.color}`;
+  riskEl.style.background = `${cfg.color}18`;
+
+  /* animated count-up + arc draw */
+  const duration = 1800;
+  const start = performance.now();
+  function tick(now) {
+    const p = Math.min((now - start) / duration, 1);
+    const ease = 1 - Math.pow(1 - p, 3);
+    const cur = Math.round(ease * score);
+    const dash = (cur / 10) * C * 0.75; // Changed from /100 to /10
+    arc.setAttribute('stroke-dasharray', `${dash} ${C}`);
+    scoreEl.textContent = cur;
+    if (p < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+/* ── Stat tiles ───────────────────────────────────────────────── */
+function buildStats() {
+  const critical     = REPORT.darkPatterns.filter(p => p.severity === 'critical').length;
+  const violations   = REPORT.legalMappings.filter(l => l.risk === 'violation').length;
+  const totalReq     = REPORT.trackers.reduce((a,t)=>a+t.requests,0);
+  const tiles = [
+    { label:"Dark Patterns",    value:REPORT.darkPatterns.length, color:"#D32F2F", icon:"⚠", sub:`${critical} Critical`  },
+    { label:"Privacy Trackers", value:REPORT.trackers.length,     color:"#FF7A00", icon:"◎", sub:"Active scripts"         },
+    { label:"DPDP Violations",  value:violations,                 color:"#2D5BFF", icon:"§", sub:"Sections at risk"       },
+    { label:"Total Requests",   value:totalReq,                   color:"#7000FF", icon:"↗", sub:"Tracker calls"          },
+  ];
+  const grid = document.getElementById('stat-grid');
+  tiles.forEach((t, i) => {
+    const el = document.createElement('div');
+    el.className = 'stat-tile';
+    el.style.animation = `fade-up .6s ease ${0.4+i*.08}s both`;
+    el.innerHTML = `
+      <div class="stat-top">
+        <div class="stat-label">${t.label}</div>
+        <div class="stat-icon" aria-hidden="true" style="color:${t.color}">${t.icon}</div>
+      </div>
+      <div class="stat-val" style="color:${t.color};text-shadow:0 0 20px ${t.color}44">${t.value}</div>
+      <div class="stat-sub">${t.sub}</div>`;
+    grid.appendChild(el);
+  });
+}
+
+/* ── Dark pattern cards ───────────────────────────────────────── */
+function buildDarkPatterns() {
+  const grid = document.getElementById('dark-pattern-grid');
+  REPORT.darkPatterns.forEach((p, i) => {
+    const cfg = sevConfig(p.severity);
+    const card = document.createElement('article');
+    card.className = 'dp-card';
+    card.style.cssText = `background:${cfg.bg};border:1px solid ${cfg.border};transition-delay:${i*.1}s;box-shadow:${cfg.pulse?`0 0 0 1px ${cfg.border},0 4px 24px ${cfg.bg}`:'none'}`;
+    card.setAttribute('aria-label', `${p.type} — ${cfg.label} severity`);
+    card.innerHTML = `
+      ${cfg.pulse ? `<div class="dp-card-pulse" aria-hidden="true" style="border:1px solid ${cfg.color}"></div>` : ''}
+      <div class="dp-card-top">
+        <div class="dp-card-left">
+          <div class="dp-icon" style="background:${cfg.color}1A;border:1px solid ${cfg.border}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" stroke="${cfg.color}" stroke-width="1.5" stroke-linejoin="round"/>
+              <line x1="12" y1="9" x2="12" y2="13" stroke="${cfg.color}" stroke-width="1.5" stroke-linecap="round"/>
+              <circle cx="12" cy="17" r="0.5" fill="${cfg.color}" stroke="${cfg.color}" stroke-width="1"/>
+            </svg>
+          </div>
+          <div>
+            <div class="dp-type">${p.type}</div>
+            <div class="dp-dpdp">DPDP Act · ${p.dpdpRef}</div>
+          </div>
+        </div>
+        <div class="severity-badge" style="color:${cfg.color};border:1px solid ${cfg.border};background:${cfg.bg}">${cfg.label}</div>
+      </div>
+      <p class="dp-desc">${p.description}</p>
+      <div class="dp-bottom-line" aria-hidden="true" style="background:linear-gradient(90deg,transparent,${cfg.color},transparent)"></div>`;
+    grid.appendChild(card);
+  });
+}
+
+/* ── Tracker rows ─────────────────────────────────────────────── */
+function buildTrackers() {
+  const container = document.getElementById('tracker-rows');
+  REPORT.trackers.forEach((t, i) => {
+    const rc   = riskConfig(t.risk);
+    const barW = Math.min((t.requests / 50) * 100, 100);
+    const row  = document.createElement('div');
+    row.className = 'tracker-row';
+    row.style.transitionDelay = `${i * .08}s`;
+    row.innerHTML = `
+      <div>
+        <div class="tracker-name">${t.name}</div>
+        <div class="tracker-cat-row">
+          <span class="tracker-cat">${t.category}</span>
+          <div class="tracker-bar-track">
+            <div class="tracker-bar-fill" data-w="${barW}" style="background:${rc.color};box-shadow:0 0 6px ${rc.color}"></div>
+          </div>
+        </div>
+      </div>
+      <div class="tracker-req">${t.requests} <span>req</span></div>
+      <div class="risk-badge" style="color:${rc.color};background:${rc.bg};border:1px solid ${rc.color}40">${t.risk}</div>`;
+    container.appendChild(row);
+  });
+}
+
+/* ── AI analysis ──────────────────────────────────────────────── */
+function buildAI() {
+  document.getElementById('ai-text').textContent = REPORT.aiAnalysis;
+  const findings = [
+    { label:"Cognitive Bias Exploitation",  score:"High",    color:"#D32F2F" },
+    { label:"Consent Integrity",            score:"Failed",  color:"#D32F2F" },
+    { label:"Data Minimisation Compliance", score:"Partial", color:"#FBC02D" },
+    { label:"Erasure Rights Compliance",    score:"Failed",  color:"#D32F2F" },
+  ];
+  const grid = document.getElementById('ai-findings');
+  findings.forEach(f => {
+    const el = document.createElement('div');
+    el.className = 'ai-finding';
+    el.innerHTML = `<span class="ai-finding-label">${f.label}</span><span class="ai-finding-score" style="color:${f.color}">${f.score}</span>`;
+    grid.appendChild(el);
+  });
+}
+
+/* ── Legal mapping ────────────────────────────────────────────── */
+function buildLegal() {
+  const list = document.getElementById('legal-list');
+  REPORT.legalMappings.forEach((m, i) => {
+    const isV   = m.risk === 'violation';
+    const color = isV ? '#FF005C' : '#2D5BFF';
+    const card  = document.createElement('div');
+    card.className = 'legal-card';
+    card.style.cssText = `background:${color}0D;border:1px solid ${color}33;transition-delay:${i*.1}s`;
+    const iconSvg = isV
+      ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10" stroke="#FF005C" stroke-width="1.5"/><line x1="15" y1="9" x2="9" y2="15" stroke="#FF005C" stroke-width="1.5" stroke-linecap="round"/><line x1="9" y1="9" x2="15" y2="15" stroke="#FF005C" stroke-width="1.5" stroke-linecap="round"/></svg>`
+      : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10" stroke="#2D5BFF" stroke-width="1.5"/><line x1="12" y1="8" x2="12" y2="12" stroke="#2D5BFF" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="16" r="0.5" fill="#2D5BFF" stroke="#2D5BFF" stroke-width="1"/></svg>`;
+    card.innerHTML = `
+      <div class="legal-inner">
+        <div class="legal-icon" style="background:${color}1F;border:1px solid ${color}4D">${iconSvg}</div>
+        <div class="legal-meta">
+          <div class="legal-tags">
+            <span class="legal-section-label" style="color:${color}">${m.section}</span>
+            <span class="legal-tag" style="color:${color};background:${color}1A;border:1px solid ${color}4D">${isV?'VIOLATION RISK':'RISK FLAG'}</span>
+          </div>
+          <div class="legal-title">${m.title}</div>
+          <p class="legal-desc">${m.description}</p>
+        </div>
+      </div>`;
+    list.appendChild(card);
+  });
+}
+
+/* ── Wall of Shame ────────────────────────────────────────────── */
+function buildWallOfShame() {
+  const topFive = REPORT.wallOfShame.slice(0, 5);
+  const grid = document.getElementById('top-five-grid');
+
+  topFive.forEach((site, i) => {
+    const card = document.createElement('div');
+    card.className = 'top-five-card';
+    card.style.transitionDelay = `${i * .1}s`;
+    card.innerHTML = `
+      <div class="top-five-rank">${i + 1}</div>
+      <div class="top-five-content">
+        <a href="https://${site.url}" target="_blank" class="top-five-url">${site.url}</a>
+        <div class="top-five-meta">
+          <div class="top-five-score">${site.riskScore}</div>
+          <div class="top-five-reports">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M16 4h.01M16 20h.01M12 4h.01M12 12h.01M12 20h.01M8 8h.01M8 16h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            ${site.reportsThisWeek} reports
+          </div>
+        </div>
+        <div class="top-five-patterns">
+          ${site.darkPatterns.map(pattern => `<span class="pattern-tag">${pattern}</span>`).join('')}
+        </div>
+      </div>`;
+    grid.appendChild(card);
+  });
+
+  const list = document.getElementById('full-shame-list');
+  REPORT.wallOfShame.forEach((site, i) => {
+    const row = document.createElement('div');
+    row.className = 'shame-row';
+    row.style.transitionDelay = `${i * .05}s`;
+    row.innerHTML = `
+      <a href="https://${site.url}" target="_blank" class="shame-url">${site.url}</a>
+      <div class="shame-score">${site.riskScore}</div>
+      <div class="shame-reports">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M16 4h.01M16 20h.01M12 4h.01M12 12h.01M12 20h.01M8 8h.01M8 16h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        ${site.reportsThisWeek}
+      </div>
+      <div class="shame-patterns">
+        ${site.darkPatterns.map(pattern => `<span class="shame-pattern-tag">${pattern}</span>`).join('')}
+      </div>
+      <div class="shame-date">${site.lastReported}</div>`;
+    list.appendChild(row);
+  });
+}
+
+/* ── Intersection Observer for scroll reveals ─────────────────── */
+function initScrollReveal() {
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); obs.unobserve(e.target); } });
+  }, { threshold: 0.08 });
+
+  document.querySelectorAll('.content-section, .dp-card, .tracker-row, .legal-card, .top-five-card, .shame-row').forEach(el => obs.observe(el));
+
+  /* animate tracker bars when row becomes visible */
+  const barObs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        const bar = e.target.querySelector('.tracker-bar-fill');
+        if (bar) { setTimeout(() => { bar.style.width = bar.dataset.w + '%'; }, 200); }
+        barObs.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.1 });
+  document.querySelectorAll('.tracker-row').forEach(el => barObs.observe(el));
+}
+
+/* ── Export button ────────────────────────────────────────────── */
+function initExport() {
+  const btn        = document.getElementById('btn-export');
+  const labelEl    = document.getElementById('export-label');
+  const iconDl     = document.getElementById('export-icon-dl');
+  const iconSpin   = document.getElementById('export-icon-spin');
+  const iconOk     = document.getElementById('export-icon-ok');
+  let   busy       = false;
+
+  btn.addEventListener('click', () => {
+    if (busy) return;
+    busy = true;
+    btn.disabled = true;
+    iconDl.style.display   = 'none';
+    iconSpin.style.display = 'inline';
+    labelEl.textContent    = 'Exporting…';
+
+    const lines = [
+      'ConsumerShield — Security Analysis Report',
+      '==========================================',
+      `Site      : ${REPORT.site}`,
+      `Timestamp : ${REPORT.timestamp}`,
+      `Score     : ${REPORT.securityScore} / 100`,
+      '',
+      'DARK PATTERNS',
+      '─────────────',
+      ...REPORT.darkPatterns.map(p => `[${p.severity.toUpperCase()}] ${p.type}  (${p.dpdpRef})\n  ${p.description}`),
+      '',
+      'PRIVACY TRACKERS',
+      '────────────────',
+      ...REPORT.trackers.map(t => `${t.name}  •  ${t.category}  •  Risk: ${t.risk.toUpperCase()}  •  ${t.requests} req`),
+      '',
+      'AI ANALYSIS',
+      '───────────',
+      REPORT.aiAnalysis,
+      '',
+      'LEGAL MAPPING  (DPDP Act 2023)',
+      '──────────────────────────────',
+      ...REPORT.legalMappings.map(m => `${m.section}  ·  ${m.title}  [${m.risk.toUpperCase()}]\n  ${m.description}`),
+      '',
+      'Disclaimer: This report is generated by ConsumerShield AI for informational purposes only.',
+      'It does not constitute legal advice.',
+    ];
+
+    setTimeout(() => {
+      const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `consumershield-${REPORT.site}-${Date.now()}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      iconSpin.style.display = 'none';
+      iconOk.style.display   = 'inline';
+      labelEl.textContent    = 'Exported!';
+      btn.disabled           = false;
+
+      setTimeout(() => {
+        iconOk.style.display = 'none';
+        iconDl.style.display = 'inline';
+        labelEl.textContent  = 'Export Report';
+        busy = false;
+      }, 2500);
+    }, 600);
+  });
+}
+
+/* ── Rescan button ────────────────────────────────────────────── */
+document.getElementById('btn-rescan').addEventListener('click', () => { window.location.reload(); });
+
+/* ── Boot ─────────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('meta-site').textContent = REPORT.site;
+  document.getElementById('meta-time').textContent = REPORT.timestamp;
+
+  buildStats();
+  buildDarkPatterns();
+  buildTrackers();
+  buildAI();
+  buildLegal();
+  buildWallOfShame();
+  initGauge();
+  initScrollReveal();
+  initExport();
+});
+</script>
+</body>
+</html>
