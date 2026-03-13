@@ -23,14 +23,26 @@
     { domain: 'amplitude.com',         type: 'analytics',    name: 'Amplitude' },
     { domain: 'segment.com',           type: 'analytics',    name: 'Segment' },
     { domain: 'heap.io',               type: 'analytics',    name: 'Heap Analytics' },
+    { domain: 'newrelic.com',          type: 'analytics',    name: 'New Relic' },
+    { domain: 'nr-data.net',           type: 'analytics',    name: 'New Relic Browser' },
+    { domain: 'clarity.ms',            type: 'analytics',    name: 'Microsoft Clarity' },
+    { domain: 'omtrdc.net',            type: 'analytics',    name: 'Adobe Analytics' },
+    { domain: 'adobedtm.com',          type: 'analytics',    name: 'Adobe Tag Manager' },
+    { domain: 'clevertap.com',         type: 'analytics',    name: 'CleverTap' },
+    { domain: 'webengage.com',         type: 'analytics',    name: 'WebEngage' },
+    { domain: 'moengage.com',          type: 'analytics',    name: 'MoEngage' },
     // Advertising
     { domain: 'doubleclick.net',       type: 'advertising',  name: 'DoubleClick (Google)' },
     { domain: 'googlesyndication.com', type: 'advertising',  name: 'Google AdSense' },
     { domain: 'googleadservices.com',  type: 'advertising',  name: 'Google Ad Services' },
+    { domain: 'amazon-adsystem.com',   type: 'advertising',  name: 'Amazon AdSystem' },
+    { domain: 'adsystem.amazon.com',   type: 'advertising',  name: 'Amazon AdSystem' },
+    { domain: 'adservice.google.com',  type: 'advertising',  name: 'Google AdService' },
     { domain: 'criteo.com',            type: 'advertising',  name: 'Criteo' },
     { domain: 'taboola.com',           type: 'advertising',  name: 'Taboola' },
     { domain: 'outbrain.com',          type: 'advertising',  name: 'Outbrain' },
     { domain: 'moat.com',              type: 'advertising',  name: 'Moat Analytics' },
+    { domain: 'branch.io',             type: 'advertising',  name: 'Branch Attribution' },
     // Social
     { domain: 'facebook.com',          type: 'social',       name: 'Facebook Pixel' },
     { domain: 'connect.facebook.net',  type: 'social',       name: 'Facebook SDK' },
@@ -45,6 +57,17 @@
     { domain: 'rubiconproject.com',    type: 'data_broker',  name: 'Rubicon Project' },
   ];
 
+  const TRACKER_SCRIPT_SIGNATURES = [
+    { regex: /\bgtag\s*\(|googletagmanager|ga\(/i, name: 'Google Analytics', type: 'analytics', domain: 'google-analytics.com', confidence: 0.82 },
+    { regex: /\bfbq\s*\(|facebook\s*pixel/i, name: 'Facebook Pixel', type: 'social', domain: 'connect.facebook.net', confidence: 0.82 },
+    { regex: /\bclarity\s*\(/i, name: 'Microsoft Clarity', type: 'analytics', domain: 'clarity.ms', confidence: 0.8 },
+    { regex: /\bmixpanel\b/i, name: 'Mixpanel', type: 'analytics', domain: 'mixpanel.com', confidence: 0.8 },
+    { regex: /\bsegment\b|analytics\.track\(/i, name: 'Segment', type: 'analytics', domain: 'segment.com', confidence: 0.78 },
+    { regex: /\bhotjar\b/i, name: 'Hotjar', type: 'analytics', domain: 'hotjar.com', confidence: 0.78 },
+  ];
+
+  const TRACKING_HOST_HINTS = /(analytics|pixel|track|tracker|telemetry|metrics|remarketing|adservice|doubleclick|insight|beacon|tagmanager|moengage|webengage|clevertap|criteo|taboola|outbrain)/i;
+
   // ═══════════════════════════════════════════════════════════════════════════
   // DARK PATTERN SIGNATURES
   // ═══════════════════════════════════════════════════════════════════════════
@@ -57,6 +80,7 @@
       penalty: '₹10 lakh – ₹50 lakh',
       description: 'Creates artificial scarcity or time pressure to force rushed decisions.',
       patterns: [
+        /\bfalse\s*urgency\b/i,
         /only\s*(\d+|one|two|three|few|several)\s*(left|remaining|in stock|available|spots)/i,
         /hurry[!,\s]*only/i,
         /selling\s*out|sold\s*out/i,
@@ -86,6 +110,7 @@
       penalty: '₹25 lakh – ₹50 lakh',
       description: 'Hides additional charges until late in the checkout process.',
       patterns: [
+        /\b(sneaking|drip\s*pricing|hidden\s*costs?)\b/i,
         /convenience\s*fee/i,
         /handling\s*(charges?|fee|cost)/i,
         /platform\s*fee/i,
@@ -109,6 +134,7 @@
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Uses guilt-inducing language to shame users into accepting offers.',
       patterns: [
+        /\bconfirm\s*shaming\b/i,
         /no\s*(?:thanks?|thanx)[,.]?\s*i\s*(?:don'?t|prefer not|hate|refuse|skip|decline)/i,
         /no[,.]?\s*i\s*(?:enjoy|love|like|prefer)\s*(?:paying|spending|wasting|overpaying)/i,
         /i\s*(?:don'?t|do not|really don'?t|never)\s*(?:care|want|need)\s*(?:about|for)?\s*(?:saving|discount|deals?|money)/i,
@@ -127,6 +153,7 @@
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Uses confusing double negatives or ambiguous language on consent forms.',
       patterns: [
+        /\b(trick\s*questions?|trick\s*wording|double\s*negatives?)\b/i,
         /uncheck\s*(?:this\s*)?(?:box|if)\s*(?:to\s*)?(?:not|stop|opt[\s-]?out)/i,
         /do\s*not\s*(?:un)?check\s*(?:if\s*)?you\s*do\s*not\s*want/i,
         /opt\s*out\s*of\s*(?:not\s*)?receiving/i,
@@ -143,6 +170,7 @@
       penalty: '₹25 lakh – ₹50 lakh',
       description: 'Auto-renews subscriptions without clear notice or easy cancellation.',
       patterns: [
+        /\bforced\s*continuity\b/i,
         /automatically\s*(?:renew|charge|bill|debit)(?:ed)?/i,
         /auto[\s-]?(?:renew|renewal|billing)/i,
         /cancel\s*(?:any\s*)?time|cancel\s*(?:within|after)/i,
@@ -163,6 +191,7 @@
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Presents paid advertisements as organic content or results.',
       patterns: [
+        /\bdisguised\s*ads?\b/i,
         /sponsored\s*(?:result|post|content|link|listing|product|ad)/i,
         /(?:^\s*|\s+)ad\s*(?:\s*·|:|\s*-|\s*$)/i,
         /promoted\s*(?:listing|result|product|post|content|by)/i,
@@ -182,6 +211,7 @@
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Directs users toward unintended options through visual or hierarchical emphasis.',
       patterns: [
+        /\bmisdirection\b/i,
         /(?:highly\s*|most\s*|top\s*)?recommended\s*(?:plan|product|offer|choice|option)/i,
         /best.*seller|best.*choice/i,
         /customers?\s*(?:also\s*)?(?:like|buy|chose|prefer)/i,
@@ -200,6 +230,7 @@
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Repeatedly prompts or nags users to take an action.',
       patterns: [
+        /\bnagging\b/i,
         /(?:newsletter|subscription|notification|offer|deal|popup|modal).*(?:subscribe|sign[\s-]?up|get|receive)/i,
         /(?:don'?t|never).*(?:show|tell|remind) .*again/i,
         /subscribe.*newsletter|newsletter.*subscribe/i,
@@ -216,6 +247,7 @@
       penalty: '₹25 lakh – ₹50 lakh',
       description: 'Makes it difficult to cancel subscriptions, delete accounts, or compare alternatives.',
       patterns: [
+        /\b(obstruction|roach\s*motel)\b/i,
         /to\s*(?:cancel|delete|unsubscribe|opt[\s-]?out)[,.]?\s*(?:call|contact|visit|go\s*to|email)/i,
         /cancel.*(?:by\s*)?(?:phone|calling|mail|email|customer\s*service)/i,
         /speak.*(?:to|with).*(?:an?\s*)?agent.*(?:to\s*)?cancel/i,
@@ -230,7 +262,10 @@
       law: 'CCPA Dark Patterns Guidelines 2023 — Pre-selected Options',
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Automatically selects options that benefit the company over the user.',
-      patterns: [],   // detected via DOM inspection below
+      patterns: [
+        /\bpre[\s-]?selected\s*(?:harmful\s*)?options?\b/i,
+        /\bpre[\s-]?selected\b/i,
+      ],
       domCheck: true,
     },
   };
@@ -276,48 +311,104 @@
 
   // Avoid re-running on dynamic pages
   let analysisRun = false;
+  let warmupRescanScheduled = false;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 1. TRACKER DETECTION
   // ═══════════════════════════════════════════════════════════════════════════
 
   function detectTrackers() {
-    const found = [];
-    const pageHTML = document.documentElement.innerHTML;
-    const seenNames = new Set();
+    const pageHTML = document.documentElement?.innerHTML || '';
+    const firstPartyDomain = normalizeDomainLike(window.location.hostname);
+    const trackerMap = new Map();
 
-    const TRACKERS = [
-      { domain: 'google-analytics.com', type: 'analytics', name: 'Google Analytics' },
-      { domain: 'googletagmanager.com', type: 'analytics', name: 'Google Tag Manager' },
-      { domain: 'googlesyndication.com', type: 'advertising', name: 'Google AdSense' },
-      { domain: 'connect.facebook.net', type: 'social', name: 'Facebook Pixel' },
-      { domain: 'doubleclick.net', type: 'advertising', name: 'DoubleClick' },
-      { domain: 'hotjar.com', type: 'analytics', name: 'Hotjar' },
-      { domain: 'newrelic.com', type: 'analytics', name: 'New Relic' },
-      { domain: 'nr-data.net', type: 'analytics', name: 'New Relic' },
-      { domain: 'clevertap.com', type: 'analytics', name: 'CleverTap' },
-      { domain: 'webengage.com', type: 'analytics', name: 'WebEngage' },
-      { domain: 'moengage.com', type: 'analytics', name: 'MoEngage' },
-      { domain: 'criteo.com', type: 'advertising', name: 'Criteo' },
-      { domain: 'taboola.com', type: 'advertising', name: 'Taboola' },
-    ];
+    const upsertTracker = (tracker, source, confidence = 0.72) => {
+      const domain = normalizeDomainLike(tracker.domain);
+      const name = String(tracker.name || '').trim() || 'Potential Tracking Endpoint';
+      if (!domain) return;
 
-    TRACKERS.forEach(tracker => {
-      if (pageHTML.includes(tracker.domain) && !seenNames.has(tracker.name)) {
-        seenNames.add(tracker.name);
-        found.push({ domain: tracker.domain, type: tracker.type, name: tracker.name });
-        state.trackers.push({ domain: tracker.domain, type: tracker.type, name: tracker.name });
+      const key = `${domain}|${name}`;
+      const existing = trackerMap.get(key);
+      const candidate = {
+        domain,
+        type: tracker.type || 'tracker',
+        name,
+        source,
+        confidence,
+      };
+
+      if (!existing || (existing.confidence || 0) < confidence) {
+        trackerMap.set(key, candidate);
+      }
+    };
+
+    // 1) Inspect domains from page resources (script/img/iframe/link/etc.)
+    const resourceHits = collectResourceDomains();
+    resourceHits.forEach((hit) => {
+      const domain = normalizeDomainLike(hit.domain);
+      if (!domain || isFirstPartyDomain(domain, firstPartyDomain)) return;
+
+      const known = findKnownTracker(domain);
+      if (known) {
+        upsertTracker(known, hit.source, 0.93);
+        return;
+      }
+
+      if (TRACKING_HOST_HINTS.test(domain)) {
+        upsertTracker(
+          {
+            domain,
+            type: 'tracker',
+            name: 'Potential Tracking Endpoint',
+          },
+          hit.source,
+          0.69,
+        );
       }
     });
 
-    // Canvas fingerprinting signal
-    if (
-      pageHTML.includes('getImageData') && pageHTML.includes('canvas') ||
-      pageHTML.includes('HTMLCanvasElement') && pageHTML.includes('toDataURL')
-    ) {
-      state.fingerprinting = true;
-    }
-    
+    // 2) Signature fallback from HTML/script text
+    KNOWN_TRACKERS.forEach((tracker) => {
+      if (pageHTML.includes(tracker.domain)) {
+        upsertTracker(tracker, 'html-signature', 0.84);
+      }
+    });
+
+    TRACKER_SCRIPT_SIGNATURES.forEach((signature) => {
+      if (!signature.regex.test(pageHTML)) return;
+      upsertTracker(
+        {
+          domain: signature.domain,
+          type: signature.type,
+          name: signature.name,
+        },
+        'script-signature',
+        signature.confidence || 0.8,
+      );
+    });
+
+    state.trackers = Array.from(trackerMap.values())
+      .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+      .map((item) => ({
+        domain: item.domain,
+        type: item.type,
+        name: item.name,
+      }));
+
+    // Require multiple fingerprinting signals to reduce false positives.
+    let fingerprintSignalHits = 0;
+    [
+      /getImageData\s*\(/i,
+      /toDataURL\s*\(/i,
+      /AudioContext|OfflineAudioContext/i,
+      /WEBGL_debug_renderer_info|WebGLRenderingContext/i,
+      /navigator\.plugins|navigator\.mimeTypes/i,
+      /fingerprintjs|fingerprint\s*id/i,
+    ].forEach((regex) => {
+      if (regex.test(pageHTML)) fingerprintSignalHits += 1;
+    });
+    state.fingerprinting = fingerprintSignalHits >= 2;
+
     console.log('[ConsumerShield] Trackers found:', state.trackers);
   }
 
@@ -402,6 +493,7 @@
     detectStickyBanners();
     detectModalsAndPopups();
     detectDifficultCancellation();
+    detectEcommercePricingManipulation();
     detectTrickWordingAdvanced();
     detectVisualInterference();
   }
@@ -409,24 +501,36 @@
   function detectPreselectedOptions() {
     const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]:checked, input[type="radio"]:checked'));
     const suspicious = checkboxes.filter(el => {
-      const label = getLabel(el);
-      return label && /(newsletter|marketing|offers|updates|promotional)/i.test(label);
+      const label = normalizeScanText(getLabel(el) || getElementActionText(el));
+      if (!label) return false;
+
+      const marketingOptIn = /(newsletter|marketing|offers|updates|promotional|notifications?)/i.test(label);
+      const paidAddOnOptIn = /(assurance|protection|extended\s*warranty|donation|tip|gift\s*wrap|add[-\s]?on|secure\s*packaging|priority\s*delivery|premium\s*delivery|insurance)/i.test(label);
+      return marketingOptIn || paidAddOnOptIn;
     });
 
     if (suspicious.length > 0) {
+      const suspiciousLabels = suspicious.map((el) => normalizeScanText(getLabel(el) || getElementActionText(el))).filter(Boolean);
+      const hasPaidAddOn = suspiciousLabels.some((label) => /(?:₹|rs\.?|inr)\s*[\d,]+|extended\s*warranty|secure\s*packaging|protection|tip|donation|gift\s*wrap/i.test(label));
       const existing = state.patterns.find(p => p.type === 'preselected');
       if (!existing) {
         state.patterns.push({
           type: 'preselected',
           name: DARK_PATTERNS.preselected.name,
-          severity: 'medium',
-          confidence: 0.85,
+          severity: hasPaidAddOn ? 'high' : 'medium',
+          confidence: hasPaidAddOn ? 0.9 : 0.85,
           law: DARK_PATTERNS.preselected.law,
           penalty: DARK_PATTERNS.preselected.penalty,
-          description: `${suspicious.length} pre-checked option(s) detected for marketing/promotional content.`,
+          description: hasPaidAddOn
+            ? `${suspicious.length} pre-checked option(s) detected, including paid add-ons in checkout flow.`
+            : `${suspicious.length} pre-checked option(s) detected for marketing/promotional content.`,
           element: suspicious[0],
-          text: getLabel(suspicious[0]) || 'Pre-selected checkbox',
+          text: suspiciousLabels[0] || 'Pre-selected option detected',
         });
+      } else if (hasPaidAddOn && existing.severity !== 'high') {
+        existing.severity = 'high';
+        existing.confidence = Math.max(existing.confidence || 0, 0.9);
+        existing.description = `${suspicious.length} pre-checked option(s) detected, including paid add-ons in checkout flow.`;
       }
       suspicious.forEach(el => {
         const parent = el.closest('label') || el.parentElement;
@@ -558,6 +662,138 @@
         }
       }
     }
+  }
+
+  function detectEcommercePricingManipulation() {
+    detectDripPricingInCheckout();
+    detectMisleadingDiscountMath();
+  }
+
+  function detectDripPricingInCheckout() {
+    const feeRegex = /\b(convenience|platform|handling|processing|delivery|service|packaging|small\s*order|surge|protection|booking)\b/i;
+    const revealRegex = /\b(added\s*at\s*checkout|at\s*checkout|during\s*checkout|extra\s*charges?|additional\s*charges?|taxes\s*extra|exclusive\s*of\s*taxes|calculated\s*at\s*payment|final\s*amount\s*may\s*differ)\b/i;
+
+    let bestFinding = null;
+    findPriceRelatedContainers().forEach((item) => {
+      const text = item.text;
+      const values = extractCurrencyValues(text);
+      const feeHits = text.match(new RegExp(feeRegex.source, 'gi')) || [];
+      const hasRevealLanguage = revealRegex.test(text);
+
+      if (feeHits.length === 0) return;
+      if (!hasRevealLanguage && values.length < 3) return;
+
+      const confidence = Math.min(
+        0.95,
+        0.73 + Math.min(0.12, feeHits.length * 0.03) + (hasRevealLanguage ? 0.08 : 0) + (values.length >= 4 ? 0.04 : 0),
+      );
+
+      const severity = hasRevealLanguage && /(convenience|platform|handling|processing|small\s*order)/i.test(text)
+        ? 'high'
+        : 'medium';
+
+      if (!bestFinding || confidence > bestFinding.confidence) {
+        bestFinding = {
+          text,
+          element: item.element,
+          confidence,
+          severity,
+          feeCount: feeHits.length,
+        };
+      }
+    });
+
+    if (!bestFinding) return;
+
+    const evidence = bestFinding.text.slice(0, 180);
+    const existing = state.patterns.find((p) => p.type === 'sneaking' && /drip\s*pricing\s*-\s*checkout\s*add-ons/i.test(p.name || ''));
+    const payload = {
+      type: 'sneaking',
+      name: 'Drip Pricing - Checkout Add-ons',
+      severity: bestFinding.severity,
+      confidence: bestFinding.confidence,
+      law: DARK_PATTERNS.sneaking.law,
+      penalty: DARK_PATTERNS.sneaking.penalty,
+      description: `Checkout summary includes ${bestFinding.feeCount} fee component(s) likely revealed late in the purchase flow.`,
+      element: bestFinding.element,
+      text: evidence,
+    };
+
+    if (!existing) {
+      state.patterns.push(payload);
+    } else if ((existing.confidence || 0) < payload.confidence) {
+      Object.assign(existing, payload);
+    }
+
+    if (bestFinding.element) {
+      applyOverlay(bestFinding.element, 'manipulation', 'Drip Pricing');
+    }
+  }
+
+  function detectMisleadingDiscountMath() {
+    let bestMismatch = null;
+
+    findPriceRelatedContainers().forEach((item) => {
+      const text = item.text;
+      const discountMatch = text.match(/(\d{1,3})\s*%\s*off/i);
+      if (!discountMatch) return;
+
+      const displayedDiscount = Number(discountMatch[1]);
+      if (!Number.isFinite(displayedDiscount) || displayedDiscount < 5 || displayedDiscount > 95) return;
+
+      const values = extractCurrencyValues(text).slice(0, 6);
+      if (values.length < 2) return;
+
+      const strikeNode = item.element.querySelector('s, del, [class*="strike"], [class*="line-through"], [style*="line-through"]');
+      const strikeValues = extractCurrencyValues(normalizeScanText(strikeNode?.textContent || ''));
+
+      const oldPrice = strikeValues[0] || Math.max(...values);
+      const newPrice = values.find((value) => value < oldPrice) || Math.min(...values);
+      if (!(oldPrice > newPrice && oldPrice > 0)) return;
+
+      const computedDiscount = Math.round(((oldPrice - newPrice) / oldPrice) * 100);
+      const delta = Math.abs(computedDiscount - displayedDiscount);
+      if (delta < 10) return;
+
+      const confidence = Math.min(0.95, 0.74 + Math.min(0.18, delta / 100));
+      if (!bestMismatch || confidence > bestMismatch.confidence) {
+        bestMismatch = {
+          element: item.element,
+          confidence,
+          displayedDiscount,
+          computedDiscount,
+          oldPrice,
+          newPrice,
+          delta,
+        };
+      }
+    });
+
+    if (!bestMismatch) return;
+
+    const severity = bestMismatch.delta >= 20 ? 'high' : 'medium';
+    const evidence = `Shown ${bestMismatch.displayedDiscount}% off, but Rs ${Math.round(bestMismatch.oldPrice)} to Rs ${Math.round(bestMismatch.newPrice)} implies about ${bestMismatch.computedDiscount}% off.`;
+    const existing = state.patterns.find((p) => p.type === 'sneaking' && /misleading\s*discount\s*math/i.test(p.name || ''));
+
+    const payload = {
+      type: 'sneaking',
+      name: 'Misleading Discount Math',
+      severity,
+      confidence: bestMismatch.confidence,
+      law: DARK_PATTERNS.sneaking.law,
+      penalty: DARK_PATTERNS.sneaking.penalty,
+      description: 'Displayed discount percentage does not align with visible old-vs-current price math.',
+      element: bestMismatch.element,
+      text: evidence,
+    };
+
+    if (!existing) {
+      state.patterns.push(payload);
+    } else if ((existing.confidence || 0) < payload.confidence) {
+      Object.assign(existing, payload);
+    }
+
+    applyOverlay(bestMismatch.element, 'manipulation', 'Misleading Discount');
   }
 
   function detectTrickWordingAdvanced() {
@@ -727,9 +963,10 @@
   }
 
   function applyOverlay(el, type, label) {
-    if (!el || el.dataset?.csTagged) return;
-    el.dataset.csTagged = '1';
-    el.classList.add(type === 'privacy' ? 'cs-overlay-privacy' : 'cs-overlay-manipulation');
+    const target = resolveOverlayTarget(el);
+    if (!target || target.dataset?.csTagged) return;
+    target.dataset.csTagged = '1';
+    target.classList.add(type === 'privacy' ? 'cs-overlay-privacy' : 'cs-overlay-manipulation');
 
     const tooltip = document.createElement('div');
     tooltip.className = 'cs-tooltip';
@@ -737,16 +974,147 @@
     tooltip.textContent = `${icon} ConsumerShield: ${label}`;
 
     // Make element relative if static
-    const pos = window.getComputedStyle(el).position;
-    if (pos === 'static') el.style.position = 'relative';
-    el.appendChild(tooltip);
+    const pos = window.getComputedStyle(target).position;
+    if (pos === 'static') target.style.position = 'relative';
+    target.appendChild(tooltip);
 
-    state.overlayElements.push(el);
+    state.overlayElements.push(target);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // HELPERS
   // ═══════════════════════════════════════════════════════════════════════════
+
+  function normalizeDomainLike(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return '';
+    const noProtocol = raw.replace(/^https?:\/\//, '');
+    const noPath = noProtocol.split('/')[0].split(':')[0].replace(/^www\./, '');
+    return noPath;
+  }
+
+  function resolveOverlayTarget(el) {
+    if (!el) return null;
+    const voidLikeTags = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+    const tag = String(el.tagName || '').toLowerCase();
+    if (voidLikeTags.has(tag)) {
+      return el.closest('label, div, section, article, form') || el.parentElement || null;
+    }
+    return el;
+  }
+
+  function extractHostnameFromUrl(raw) {
+    const input = String(raw || '').trim();
+    if (!input || input.startsWith('data:') || input.startsWith('javascript:') || input.startsWith('#')) return '';
+    try {
+      return normalizeDomainLike(new URL(input, window.location.href).hostname);
+    } catch {
+      return '';
+    }
+  }
+
+  function isFirstPartyDomain(candidateDomain, firstPartyDomain) {
+    if (!candidateDomain || !firstPartyDomain) return false;
+    return (
+      candidateDomain === firstPartyDomain
+      || candidateDomain.endsWith(`.${firstPartyDomain}`)
+      || firstPartyDomain.endsWith(`.${candidateDomain}`)
+    );
+  }
+
+  function findKnownTracker(candidateDomain) {
+    const normalizedCandidate = normalizeDomainLike(candidateDomain);
+    if (!normalizedCandidate) return null;
+    return KNOWN_TRACKERS.find((tracker) => (
+      normalizedCandidate === tracker.domain
+      || normalizedCandidate.endsWith(`.${tracker.domain}`)
+    )) || null;
+  }
+
+  function collectResourceDomains() {
+    const selectorToAttr = [
+      ['script[src]', 'src'],
+      ['img[src]', 'src'],
+      ['iframe[src]', 'src'],
+      ['link[href]', 'href'],
+      ['source[src]', 'src'],
+      ['video[src]', 'src'],
+      ['audio[src]', 'src'],
+      ['embed[src]', 'src'],
+      ['object[data]', 'data'],
+      ['form[action]', 'action'],
+    ];
+
+    const hits = [];
+    selectorToAttr.forEach(([selector, attr]) => {
+      document.querySelectorAll(selector).forEach((el) => {
+        const host = extractHostnameFromUrl(el.getAttribute(attr));
+        if (!host) return;
+        hits.push({ domain: host, source: selector });
+      });
+    });
+
+    const inlineUrlRegex = /https?:\/\/[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?[^\s"'`)]*/gi;
+    document.querySelectorAll('script:not([src])').forEach((script) => {
+      const text = script.textContent || '';
+      const matches = text.match(inlineUrlRegex) || [];
+      matches.forEach((url) => {
+        const host = extractHostnameFromUrl(url);
+        if (!host) return;
+        hits.push({ domain: host, source: 'inline-script-url' });
+      });
+    });
+
+    return hits;
+  }
+
+  function findPriceRelatedContainers() {
+    const selectors = [
+      '[class*="price"]',
+      '[id*="price"]',
+      '[class*="summary"]',
+      '[id*="summary"]',
+      '[class*="cart"]',
+      '[id*="cart"]',
+      '[class*="checkout"]',
+      '[id*="checkout"]',
+      '[class*="deal"]',
+      '[class*="offer"]',
+      '[class*="discount"]',
+      '.a-price',
+      '._30jeq3',
+      '._3I9_wc',
+    ];
+
+    const seen = new Set();
+    const containers = [];
+    document.querySelectorAll(selectors.join(', ')).forEach((el) => {
+      if (!isElementVisibleForDetection(el)) return;
+
+      const text = normalizeScanText(el.textContent || '');
+      if (text.length < 20 || text.length > 1600) return;
+      if (!/(₹|rs\.?|inr|\$)\s*[\d,]+/i.test(text)) return;
+
+      const dedupeKey = text.toLowerCase().slice(0, 180);
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
+      containers.push({ element: el, text });
+    });
+
+    return containers.slice(0, 120);
+  }
+
+  function extractCurrencyValues(text) {
+    const values = [];
+    const regex = /(?:₹|rs\.?|inr|\$)\s*([0-9][0-9,]*(?:\.\d{1,2})?)/gi;
+    const normalized = String(text || '');
+    let match;
+    while ((match = regex.exec(normalized)) !== null) {
+      const parsed = Number(match[1].replace(/,/g, ''));
+      if (Number.isFinite(parsed) && parsed > 0) values.push(parsed);
+    }
+    return values;
+  }
 
   function normalizeScanText(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
@@ -807,6 +1175,13 @@
       'button',
       'a',
       'label',
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'li',
+      'p',
+      'strong',
       '[role="button"]',
       '[role="dialog"]',
       'input[type="checkbox"]',
@@ -828,6 +1203,7 @@
       if (!isElementVisibleForDetection(el)) return;
       const text = getElementActionText(el);
       if (text.length < 8) return;
+      if (text.length > 260) return;
       const dedupeKey = text.toLowerCase();
       if (seen.has(dedupeKey)) return;
       seen.add(dedupeKey);
@@ -840,7 +1216,7 @@
       });
     });
 
-    const highSignalSentenceRegex = /\b(cookie|consent|accept|reject|decline|no\s*thanks|uncheck|untick|opt\s*out|newsletter|unsubscribe|allow|manage|settings|marketing|double\s*negative)\b/i;
+    const highSignalSentenceRegex = /\b(cookie|consent|accept|reject|decline|no\s*thanks|uncheck|untick|opt\s*out|newsletter|unsubscribe|allow|manage|settings|marketing|double\s*negative|dark\s*patterns?|deceptive\s*patterns?|false\s*urgency|sneaking|drip\s*pricing|hidden\s*costs?|confirm\s*shaming|trick\s*wording|forced\s*continuity|disguised\s*ads?|misdirection|nagging|obstruction|roach\s*motel|pre[\s-]?selected)\b/i;
     const bodySentences = normalizeScanText(bodyText || '')
       .split(/(?<=[.!?])\s+/)
       .map((entry) => entry.trim())
@@ -920,6 +1296,20 @@
     if (analysisRun) return;
     analysisRun = true;
 
+    if (!warmupRescanScheduled) {
+      warmupRescanScheduled = true;
+      [2800, 6500].forEach((delayMs) => {
+        setTimeout(() => {
+          analysisRun = false;
+          state.trackers = [];
+          state.patterns = [];
+          state.policy = { thirdPartySharing: false, noOptOut: false, extensiveCollection: false, hasOptOut: false };
+          state.fingerprinting = false;
+          runAnalysis();
+        }, delayMs);
+      });
+    }
+
     try {
       injectOverlayStyles();
       detectTrackers();
@@ -976,6 +1366,7 @@
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       analysisRun = false;
+      warmupRescanScheduled = false;
       state.trackers = [];
       state.patterns = [];
       state.policy = { thirdPartySharing: false, noOptOut: false, extensiveCollection: false, hasOptOut: false };

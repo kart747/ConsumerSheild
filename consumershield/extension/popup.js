@@ -17,6 +17,8 @@ const TRACKER_ICONS = {
   tracker: '🛰️',
 };
 
+let popupRefreshAttempted = false;
+
 document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
   setupActions();
@@ -279,6 +281,27 @@ async function loadAndRender() {
   const domain = normalizeDomain(tab.url);
   chrome.storage.local.get([domain], async (result) => {
     const analysis = result[domain];
+    const now = Date.now();
+    const patterns = analysis?.manipulation?.patterns || [];
+    const analysisTs = Number(analysis?.timestamp || 0);
+    const hasValidTimestamp = Number.isFinite(analysisTs) && analysisTs > 0;
+    const ageMs = hasValidTimestamp ? now - analysisTs : Number.POSITIVE_INFINITY;
+    const shouldAttemptRefresh = !analysis || ageMs > 120000 || (patterns.length === 0 && ageMs > 8000);
+
+    if (shouldAttemptRefresh && !popupRefreshAttempted && tab?.id) {
+      popupRefreshAttempted = true;
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content.js'],
+        });
+      } catch {
+        // Ignore restricted pages or temporary injection failures.
+      }
+      setTimeout(loadAndRender, 1700);
+      return;
+    }
+
     if (!analysis) {
       setTimeout(loadAndRender, 2000);
       return;
@@ -517,6 +540,8 @@ function getPatternCitation(type) {
     trick_questions: '⚖️ Violation: CCPA Dark Patterns Guidelines 2023.',
     forced_continuity: '⚖️ Violation: Consumer Protection Act 2019 Sec. 2(47).',
     disguised_ads: '⚖️ Violation: CCPA Dark Patterns Guidelines 2023.',
+    misdirection: '⚖️ Violation: CCPA Dark Patterns Guidelines 2023.',
+    nagging: '⚖️ Violation: CCPA Dark Patterns Guidelines 2023.',
     preselected: '⚖️ Violation: DPDP Act 2023 Sec. 6.',
     obstruction: '⚖️ Violation: Consumer Protection Act 2019 Sec. 2(47).',
   };
@@ -882,6 +907,8 @@ function buildManipulationLegalItems(manipulation) {
     trick_questions: { law: 'CCPA Guidelines 2023', section: 'Trick Questions', issue: 'Double negatives on consent forms', penalty: '₹10 lakh – ₹25 lakh' },
     forced_continuity: { law: 'CCPA Guidelines 2023', section: 'Forced Continuity', issue: 'Auto-renewal without clear notice', penalty: '₹25 lakh – ₹50 lakh' },
     disguised_ads: { law: 'CCPA Guidelines 2023', section: 'Disguised Ads', issue: 'Ads presented as organic content', penalty: '₹10 lakh – ₹25 lakh' },
+    misdirection: { law: 'CCPA Guidelines 2023', section: 'Misdirection', issue: 'Visual hierarchy nudges user toward unintended choice', penalty: '₹10 lakh – ₹25 lakh' },
+    nagging: { law: 'CCPA Guidelines 2023', section: 'Nagging', issue: 'Repeated prompts that pressure repeated user action', penalty: '₹10 lakh – ₹25 lakh' },
     preselected: { law: 'CCPA Guidelines 2023', section: 'Pre-selected Options', issue: 'Harmful options pre-checked without consent', penalty: '₹10 lakh – ₹25 lakh' },
     obstruction: { law: 'CCPA Guidelines 2023', section: 'Obstruction', issue: 'Making cancellation deliberately difficult', penalty: '₹25 lakh – ₹50 lakh' },
   };

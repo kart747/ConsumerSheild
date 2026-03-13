@@ -116,6 +116,26 @@ REGULATORY_FRAMEWORK = {
             "also_violates": "ASCI Code of Self-Regulation in Advertising",
         },
 
+        "misdirection": {
+            "law":         "Guidelines for Prevention and Regulation of Dark Patterns 2023",
+            "short":       "CCPA Dark Patterns Guidelines 2023",
+            "section":     "Schedule — Item 10: Misdirection",
+            "description": "Using visual hierarchy or framing to steer users toward a seller-favored choice.",
+            "penalty":     {"min": "₹10 lakh", "max": "₹25 lakh"},
+            "authority":   "Central Consumer Protection Authority (CCPA)",
+            "also_violates": "Consumer Protection Act 2019, Section 2(47)",
+        },
+
+        "nagging": {
+            "law":         "Guidelines for Prevention and Regulation of Dark Patterns 2023",
+            "short":       "CCPA Dark Patterns Guidelines 2023",
+            "section":     "Schedule — Item 9: Nagging",
+            "description": "Repeated prompts and interruptions that pressure users into actions they did not intend.",
+            "penalty":     {"min": "₹10 lakh", "max": "₹25 lakh"},
+            "authority":   "Central Consumer Protection Authority (CCPA)",
+            "also_violates": "Consumer Protection Act 2019, Section 2(47)",
+        },
+
         "preselected": {
             "law":         "Guidelines for Prevention and Regulation of Dark Patterns 2023",
             "short":       "CCPA Dark Patterns Guidelines 2023",

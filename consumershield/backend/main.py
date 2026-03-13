@@ -118,7 +118,26 @@ except Exception as e:
     print(f"[ConsumerShield] Failed to load BERT: {e}")
 
 # ── Tracker Radar + heuristic intelligence ───────────────────
-TRACKING_KEYWORDS = ("ads", "pixel", "analytics", "metrics", "track", "telemetry")
+TRACKING_KEYWORDS = (
+    "ads",
+    "pixel",
+    "analytics",
+    "metrics",
+    "track",
+    "telemetry",
+    "tagmanager",
+    "doubleclick",
+    "adservice",
+    "remarketing",
+    "insight",
+    "beacon",
+    "criteo",
+    "taboola",
+    "outbrain",
+    "clevertap",
+    "webengage",
+    "moengage",
+)
 CDN_KEYWORDS = ("cdn", "static", "assets", "cloudfront", "akamai", "fastly", "jsdelivr", "gstatic")
 
 RADAR_DOMAIN_MAP: Dict[str, Dict[str, Any]] = {}
