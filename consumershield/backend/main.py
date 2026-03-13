@@ -9,6 +9,7 @@ Endpoints:
 """
 
 import os
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -211,8 +212,13 @@ Website: {url}
 Trackers found: {len(privacy.trackers)}
 Dark patterns found: {len(manipulation.patterns)} ({', '.join([p.name for p in manipulation.patterns[:3]])})
 In 2 sentences explain: how this site exploits users and which Indian law (DPDP Act 2023 / CCPA Guidelines 2023) is violated."""
-            response = gemini_model.generate_content(prompt)
+            response = await asyncio.wait_for(
+                asyncio.to_thread(gemini_model.generate_content, prompt),
+                timeout=5.0
+            )
             return response.text.strip()
+        except asyncio.TimeoutError:
+            print("[ConsumerShield] Gemini API timed out after 5s — falling back to rule-based insight")
         except Exception as e:
             print(f"Gemini error: {e}")
     return make_rule_insight(url, privacy, manipulation,
