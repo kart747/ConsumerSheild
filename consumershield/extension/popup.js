@@ -102,6 +102,7 @@ async function loadAndRender() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) return;
   const domain = normalizeDomain(tab.url);
+  const currentUrl = tab.url;
 
   chrome.storage.local.get([domain], async (result) => {
     const analysis = result[domain];
@@ -120,6 +121,35 @@ async function loadAndRender() {
       if (aiInsight) {
         displayAIInsight(aiInsight);
       }
+
+      // Explicit fallback: fetch and display Gemini AI insight at the very end
+      setTimeout(() => {
+        const trackers = analysis.privacy?.trackers || [];
+        const patterns = analysis.manipulation?.patterns || [];
+        
+        getAIInsight(currentUrl, trackers, patterns)
+          .then(insight => {
+            if (!insight) return;
+            const existing = document.getElementById('ai-insight-box');
+            if (existing) existing.remove();
+            
+            const div = document.createElement('div');
+            div.id = 'ai-insight-box';
+            div.style.cssText = 'background:#f0f4ff;border-left:3px solid #4f46e5;padding:10px;margin:10px 0;font-size:12px;border-radius:4px;line-height:1.5;';
+            div.innerHTML = `🤖 <strong>Gemini Insight:</strong> ${insight}`;
+            
+            const overviewTab = document.getElementById('tab-content-overview');
+            if (overviewTab) {
+              const lawsSection = document.getElementById('laws-section');
+              if (lawsSection && lawsSection.style.display !== 'none') {
+                lawsSection.parentNode.insertBefore(div, lawsSection.nextSibling);
+              } else {
+                overviewTab.appendChild(div);
+              }
+            }
+          })
+          .catch(err => console.log('[ConsumerShield] AI insight error:', err));
+      }, 500);
     } else {
       // Retry after 2 seconds (content script may still be running)
       setTimeout(loadAndRender, 2000);

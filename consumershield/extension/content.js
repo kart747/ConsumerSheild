@@ -662,34 +662,36 @@
       detectDarkPatterns();
 
       // Send results to background worker
-      chrome.runtime.sendMessage({
-        action: 'analyzeComplete',
-        data: {
-          url: window.location.href,
-          domain: window.location.hostname,
-          timestamp: Date.now(),
-          privacy: {
-            trackers: state.trackers,
-            policy: state.policy,
-            fingerprinting: state.fingerprinting,
-          },
-          manipulation: {
-            patterns: state.patterns.map(p => ({
-              type: p.type,
-              name: p.name,
-              severity: p.severity,
-              confidence: p.confidence,
-              law: p.law,
-              penalty: p.penalty,
-              description: p.description,
-              text: p.text,
-            })),
-          },
-        }
-      }, () => {
-        // Ignore connection errors (popup may not be open)
-        if (chrome.runtime.lastError) { /* noop */ }
-      });
+      if (chrome && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({
+          action: 'analyzeComplete',
+          data: {
+            url: window.location.href,
+            domain: window.location.hostname,
+            timestamp: Date.now(),
+            privacy: {
+              trackers: state.trackers,
+              policy: state.policy,
+              fingerprinting: state.fingerprinting,
+            },
+            manipulation: {
+              patterns: state.patterns.map(p => ({
+                type: p.type,
+                name: p.name,
+                severity: p.severity,
+                confidence: p.confidence,
+                law: p.law,
+                penalty: p.penalty,
+                description: p.description,
+                text: p.text,
+              })),
+            },
+          }
+        }, () => {
+          // Ignore connection errors (popup may not be open)
+          if (chrome.runtime.lastError) { /* noop */ }
+        });
+      }
     } catch (err) {
       console.warn('[ConsumerShield] Analysis error:', err);
     }
