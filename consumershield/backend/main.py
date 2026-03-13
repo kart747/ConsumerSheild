@@ -10,6 +10,10 @@ Endpoints:
 
 import os
 import asyncio
+import json
+import math
+import re
+import ipaddress
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,6 +55,256 @@ try:
     print("[ConsumerShield] Local BERT loaded successfully!")
 except Exception as e:
     print(f"[ConsumerShield] Failed to load BERT: {e}")
+
+# ── Tracker Radar + heuristic intelligence ───────────────────
+TRACKING_KEYWORDS = ("ads", "pixel", "analytics", "metrics", "track", "telemetry")
+CDN_KEYWORDS = ("cdn", "static", "assets", "cloudfront", "akamai", "fastly", "jsdelivr", "gstatic")
+
+RADAR_DOMAIN_MAP: Dict[str, Dict[str, Any]] = {}
+RADAR_SOURCE_PATH: Optional[str] = None
+RADAR_LOAD_ERROR: Optional[str] = None
+
+
+def normalize_domain(domain: str) -> str:
+    if not domain:
+        return ""
+    cleaned = domain.strip().lower()
+    if "://" in cleaned:
+        cleaned = cleaned.split("://", 1)[1]
+    cleaned = cleaned.split("/", 1)[0]
+    cleaned = cleaned.split(":", 1)[0]
+    return cleaned.strip(".")
+
+
+def walk_subdomains(domain: str) -> List[str]:
+    """Walk from full host to parent domain, e.g. a.b.c.com -> [a.b.c.com, b.c.com, c.com]."""
+    normalized = normalize_domain(domain)
+    if not normalized:
+        return []
+    parts = normalized.split(".")
+    if len(parts) == 1:
+        return [normalized]
+    return [".".join(parts[idx:]) for idx in range(0, len(parts) - 1)]
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_entity_name(record: Dict[str, Any]) -> str:
+    owner = record.get("owner")
+    if isinstance(owner, dict):
+        for key in ("displayName", "name", "organization"):
+            value = owner.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    elif isinstance(owner, str) and owner.strip():
+        return owner.strip()
+
+    for key in ("entity", "company", "organization", "org", "ownerName"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return "Unknown Entity"
+
+
+def _extract_categories(record: Dict[str, Any]) -> List[str]:
+    for key in ("categories", "tags", "types"):
+        value = record.get(key)
+        if isinstance(value, list):
+            return [str(item) for item in value if item is not None]
+        if isinstance(value, str) and value:
+            return [value]
+    record_type = record.get("type")
+    if isinstance(record_type, str) and record_type:
+        return [record_type]
+    return []
+
+
+def _iter_radar_records(raw_data: Any):
+    if isinstance(raw_data, list):
+        for item in raw_data:
+            if isinstance(item, dict):
+                yield item
+        return
+
+    if not isinstance(raw_data, dict):
+        return
+
+    domains_field = raw_data.get("domains")
+    if isinstance(domains_field, dict):
+        for domain, info in domains_field.items():
+            if isinstance(info, dict):
+                merged = dict(info)
+                merged.setdefault("domain", domain)
+                yield merged
+        return
+    if isinstance(domains_field, list):
+        for item in domains_field:
+            if isinstance(item, dict):
+                yield item
+        return
+
+    # Fallback: assume top-level mapping of domain -> record
+    for domain, info in raw_data.items():
+        if isinstance(info, dict):
+            merged = dict(info)
+            merged.setdefault("domain", domain)
+            yield merged
+
+
+def _candidate_radar_paths() -> List[str]:
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_dir = os.path.dirname(backend_dir)
+    configured = os.getenv("RADAR_LITE_PATH", "").strip()
+    candidates = [
+        configured,
+        os.path.join(backend_dir, "radar_lite.json"),
+        os.path.join(repo_dir, "radar_lite.json"),
+        os.path.join(os.getcwd(), "radar_lite.json"),
+    ]
+
+    seen = set()
+    deduped = []
+    for path in candidates:
+        if path and path not in seen:
+            seen.add(path)
+            deduped.append(path)
+    return deduped
+
+
+def load_radar_lite() -> None:
+    global RADAR_DOMAIN_MAP, RADAR_SOURCE_PATH, RADAR_LOAD_ERROR
+
+    RADAR_DOMAIN_MAP = {}
+    RADAR_SOURCE_PATH = None
+    RADAR_LOAD_ERROR = None
+
+    for path in _candidate_radar_paths():
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw_data = json.load(handle)
+
+            domain_map: Dict[str, Dict[str, Any]] = {}
+            for record in _iter_radar_records(raw_data):
+                record_domain = normalize_domain(str(record.get("domain", "")))
+                if not record_domain:
+                    continue
+                domain_map[record_domain] = {
+                    "domain": record_domain,
+                    "entity": _extract_entity_name(record),
+                    "prevalence": _to_float(record.get("prevalence")),
+                    "categories": _extract_categories(record),
+                }
+
+            RADAR_DOMAIN_MAP = domain_map
+            RADAR_SOURCE_PATH = path
+            print(f"[ConsumerShield] Loaded radar_lite.json with {len(domain_map)} domains from {path}")
+            return
+        except Exception as exc:
+            RADAR_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
+            print(f"[ConsumerShield] Failed to load radar_lite.json from {path}: {RADAR_LOAD_ERROR}")
+            return
+
+    RADAR_LOAD_ERROR = "radar_lite.json not found"
+    print("[ConsumerShield] radar_lite.json not found; using heuristic-only domain intelligence")
+
+
+def resolve_radar_entity(domain: str) -> Optional[Dict[str, Any]]:
+    """Tier 1: exact/subdomain-walk lookup in Tracker Radar map."""
+    for candidate in walk_subdomains(domain):
+        found = RADAR_DOMAIN_MAP.get(candidate)
+        if found:
+            return {
+                **found,
+                "matched_domain": candidate,
+                "input_domain": normalize_domain(domain),
+            }
+    return None
+
+
+def _has_tracking_keywords(domain: str) -> List[str]:
+    lowered = normalize_domain(domain)
+    return [keyword for keyword in TRACKING_KEYWORDS if keyword in lowered]
+
+
+def _is_ip_domain(domain: str) -> bool:
+    try:
+        ipaddress.ip_address(normalize_domain(domain))
+        return True
+    except ValueError:
+        return False
+
+
+def _shannon_entropy(value: str) -> float:
+    if not value:
+        return 0.0
+    counts: Dict[str, int] = {}
+    for ch in value:
+        counts[ch] = counts.get(ch, 0) + 1
+    entropy = 0.0
+    total = len(value)
+    for count in counts.values():
+        probability = count / total
+        entropy -= probability * math.log2(probability)
+    return entropy
+
+
+def _has_suspicious_entropy(domain: str) -> bool:
+    normalized = normalize_domain(domain)
+    labels = [label for label in normalized.split(".") if label]
+    if not labels:
+        return False
+
+    longest = max(labels, key=len)
+    if len(longest) < 14:
+        return False
+
+    entropy = _shannon_entropy(longest)
+    has_letters = bool(re.search(r"[a-z]", longest))
+    has_digits = bool(re.search(r"\d", longest))
+    return entropy >= 3.5 and (has_letters and has_digits)
+
+
+def _is_standard_cdn(domain: str) -> bool:
+    lowered = normalize_domain(domain)
+    return any(keyword in lowered for keyword in CDN_KEYWORDS)
+
+
+def predict_tracker_score(domain: str, radar_match: Optional[Dict[str, Any]], reasons: List[str]) -> float:
+    """Tier 3: risk scoring from 1-10 based on known prevalence and heuristics."""
+    if radar_match:
+        prevalence = radar_match.get("prevalence")
+        if isinstance(prevalence, (int, float)):
+            if prevalence >= 0.05:
+                return 10.0
+            if prevalence >= 0.02:
+                return 9.0
+            if prevalence >= 0.005:
+                return 8.0
+        categories = [str(cat).lower() for cat in radar_match.get("categories", [])]
+        if any(cat in {"advertising", "analytics", "tracker", "fingerprinting"} for cat in categories):
+            return 8.0
+        return 7.0
+
+    if any(reason.startswith("keyword:") for reason in reasons):
+        return 6.5
+    if "ip-domain" in reasons or "suspicious-entropy" in reasons:
+        return 6.0
+    if _is_standard_cdn(domain):
+        return 2.5
+    return 4.0
+
+
+load_radar_lite()
 
 # ── App ───────────────────────────────────────────────────────
 app = FastAPI(
@@ -134,6 +388,17 @@ class CompleteResponse(BaseModel):
     regulatory_violations: List[Dict[str, str]]
     ai_powered: bool
     ai_details: Optional[Dict[str, Any]] = None  # Contains gemini_insight, bert_classification, timestamp
+
+
+class AnalyzeDomainsRequest(BaseModel):
+    domains: List[str]
+    first_party_domain: Optional[str] = None
+
+
+class AnalyzeDomainsResponse(BaseModel):
+    resolved_trackers: List[Dict[str, Any]]
+    suspicious_domains: List[Dict[str, Any]]
+    total_privacy_score: float
 
 # ── Risk Calculators ──────────────────────────────────────────
 
@@ -336,6 +601,72 @@ async def analyze_complete(req: CompleteRequest):
         regulatory_violations=violations,
         ai_powered=GEMINI_AVAILABLE,
         ai_details=combined,
+    )
+
+
+@app.post("/analyze-domains", response_model=AnalyzeDomainsResponse)
+async def analyze_domains(req: AnalyzeDomainsRequest):
+    first_party = normalize_domain(req.first_party_domain or "")
+
+    unique_domains: List[str] = []
+    seen = set()
+    for raw_domain in req.domains:
+        normalized = normalize_domain(raw_domain)
+        if not normalized or normalized in seen:
+            continue
+        if first_party and (normalized == first_party or normalized.endswith(f".{first_party}")):
+            continue
+        seen.add(normalized)
+        unique_domains.append(normalized)
+
+    resolved_trackers: List[Dict[str, Any]] = []
+    suspicious_domains: List[Dict[str, Any]] = []
+    weighted_sum = 0.0
+    total_weight = 0.0
+
+    for domain in unique_domains:
+        reasons: List[str] = []
+        keyword_hits = _has_tracking_keywords(domain)
+        reasons.extend([f"keyword:{keyword}" for keyword in keyword_hits])
+        if _is_ip_domain(domain):
+            reasons.append("ip-domain")
+        if _has_suspicious_entropy(domain):
+            reasons.append("suspicious-entropy")
+
+        radar_match = resolve_radar_entity(domain)
+        score = predict_tracker_score(domain, radar_match, reasons)
+
+        weight = 1.0
+        if radar_match and isinstance(radar_match.get("prevalence"), (int, float)):
+            weight += min(1.0, float(radar_match["prevalence"]) * 20.0)
+        if reasons:
+            weight += 0.1
+
+        weighted_sum += score * weight
+        total_weight += weight
+
+        if radar_match:
+            resolved_trackers.append({
+                "domain": domain,
+                "matched_domain": radar_match.get("matched_domain"),
+                "entity": radar_match.get("entity"),
+                "prevalence": radar_match.get("prevalence"),
+                "categories": radar_match.get("categories", []),
+                "privacy_score": score,
+            })
+        elif reasons:
+            suspicious_domains.append({
+                "domain": domain,
+                "reasons": reasons,
+                "privacy_score": score,
+            })
+
+    total_privacy_score = round((weighted_sum / total_weight), 2) if total_weight > 0 else 1.0
+
+    return AnalyzeDomainsResponse(
+        resolved_trackers=resolved_trackers,
+        suspicious_domains=suspicious_domains,
+        total_privacy_score=total_privacy_score,
     )
 
 
