@@ -541,13 +541,26 @@
 
   // DOM-based dark pattern detection functions
   function detectCountdownTimers() {
-    const timerElements = Array.from(document.querySelectorAll('*')).filter(el => {
-      const text = el.textContent || '';
-      const isTimer = text.match(/\d+\s*(?:hours?|mins?|minutes?|seconds?)\s*(?:left|remaining)/i);
+    const candidates = document.querySelectorAll('span, div, p, strong, b, section');
+    const timerElements = [];
+    const scanLimit = Math.min(candidates.length, 1200);
+
+    for (let i = 0; i < scanLimit; i += 1) {
+      const el = candidates[i];
+      const text = normalizeScanText(el.textContent || '');
+      if (!text || text.length > 120) continue;
+
+      const isTimer = /\d+\s*(?:hours?|mins?|minutes?|seconds?)\s*(?:left|remaining)/i.test(text);
+      if (!isTimer) continue;
+
       const isVisible = el.offsetHeight > 0 && window.getComputedStyle(el).display !== 'none';
       const isReasonableSize = el.offsetWidth > 30 && el.offsetHeight > 12;
-      return isTimer && isVisible && isReasonableSize;
-    });
+      if (isVisible && isReasonableSize) {
+        timerElements.push(el);
+      }
+
+      if (timerElements.length >= 6) break;
+    }
 
     if (timerElements.length > 0) {
       const existing = state.patterns.find(p => p.type === 'urgency' && p.text === 'Countdown Timer');
@@ -1046,11 +1059,41 @@
     ];
 
     const hits = [];
+    const seen = new Set();
+
+    const addHit = (domain, source) => {
+      const normalized = normalizeDomainLike(domain);
+      if (!normalized) return;
+      const key = `${normalized}|${source}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      hits.push({ domain: normalized, source });
+    };
+
+    // Include runtime resource activity so dynamically loaded trackers are captured.
+    if (window.performance && typeof window.performance.getEntriesByType === 'function') {
+      try {
+        const resourceEntries = window.performance.getEntriesByType('resource') || [];
+        resourceEntries.forEach((entry) => {
+          if (!entry?.name) return;
+          try {
+            const host = new URL(entry.name, window.location.href).hostname;
+            const initiator = entry.initiatorType ? `performance:${entry.initiatorType}` : 'performance:resource';
+            addHit(host, initiator);
+          } catch {
+            // Ignore malformed resource URLs.
+          }
+        });
+      } catch {
+        // Ignore environments where Performance entries are restricted.
+      }
+    }
+
     selectorToAttr.forEach(([selector, attr]) => {
       document.querySelectorAll(selector).forEach((el) => {
         const host = extractHostnameFromUrl(el.getAttribute(attr));
         if (!host) return;
-        hits.push({ domain: host, source: selector });
+        addHit(host, selector);
       });
     });
 
@@ -1061,7 +1104,7 @@
       matches.forEach((url) => {
         const host = extractHostnameFromUrl(url);
         if (!host) return;
-        hits.push({ domain: host, source: 'inline-script-url' });
+        addHit(host, 'inline-script-url');
       });
     });
 

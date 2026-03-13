@@ -17,6 +17,7 @@ const TRACKER_ICONS = {
   tracker: '🛰️',
 };
 
+const REPORT_PAGE_URL = chrome.runtime.getURL('report.html');
 let popupRefreshAttempted = false;
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -62,9 +63,9 @@ function setupActions() {
         return;
       }
 
-      const blob = new Blob([buildReportHTML(analysis)], { type: 'text/html' });
-      const reportUrl = URL.createObjectURL(blob);
-      chrome.tabs.create({ url: reportUrl });
+      chrome.storage.local.set({ consumershield_last_report: analysis }, () => {
+        chrome.tabs.create({ url: REPORT_PAGE_URL });
+      });
     });
   });
 
