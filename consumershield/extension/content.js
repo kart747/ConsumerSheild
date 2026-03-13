@@ -363,6 +363,9 @@
     ) {
       state.fingerprinting = true;
     }
+    
+    // DEBUG: Log tracker detection results
+    console.log('[ConsumerShield] Trackers found:', state.trackers);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

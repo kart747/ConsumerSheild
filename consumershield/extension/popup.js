@@ -68,6 +68,11 @@ function setupActions() {
 // ── Backend API Integration ────────────────────────────────────
 async function getAIInsight(url, trackers, patterns) {
   try {
+    console.log('[ConsumerShield] Calling backend...');
+    console.log('[ConsumerShield] URL:', url);
+    console.log('[ConsumerShield] Trackers:', trackers);
+    console.log('[ConsumerShield] Patterns:', patterns);
+    
     const response = await fetch('http://localhost:8000/analyze-complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -83,9 +88,11 @@ async function getAIInsight(url, trackers, patterns) {
       })
     });
     const data = await response.json();
+    console.log('[ConsumerShield] AI response:', data);
+    console.log('[ConsumerShield] AI insight:', data.combined_insight);
     return data.combined_insight || null;
   } catch(e) {
-    console.log('Backend unreachable:', e);
+    console.log('[ConsumerShield] Backend error:', e);
     return null;
   }
 }
