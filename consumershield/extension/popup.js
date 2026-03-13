@@ -1,216 +1,521 @@
 /**
- * ConsumerShield — Popup Script
- * Reads analysis from chrome.storage, renders all 3 tabs dynamically.
+ * ConsumerShield popup script.
+ * Renders privacy, manipulation, and overview panels from stored analysis.
  */
 
-// ── Tracker type icons & labels ──────────────────────────────
-const TRACKER_ICONS = {
-  analytics:   '📊',
-  advertising: '📢',
-  social:      '👥',
-  data_broker: '🗄️',
-  tracker:     '🛰️',
-};
-
 const SEVERITY_ICONS = {
-  high:   '🔴',
+  high: '🔴',
   medium: '🟡',
-  low:    '🟢',
+  low: '🟢',
 };
 
-// ── Main entry ───────────────────────────────────────────────
+const TRACKER_ICONS = {
+  analytics: '📊',
+  advertising: '📣',
+  social: '👥',
+  data_broker: '🗃️',
+  tracker: '🛰️',
+};
+
 document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
   setupActions();
   await loadAndRender();
 });
 
-// ── Tab switching ─────────────────────────────────────────────
 function setupTabs() {
-  document.querySelectorAll('.tab').forEach(tab => {
+  document.querySelectorAll('.tab').forEach((tab) => {
     tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      document.querySelectorAll('.tab').forEach((node) => node.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach((node) => node.classList.remove('active'));
       tab.classList.add('active');
-      document.getElementById(`tab-content-${tab.dataset.tab}`).classList.add('active');
+      document.getElementById(`tab-content-${tab.dataset.tab}`)?.classList.add('active');
     });
   });
 }
 
-// ── Action buttons ────────────────────────────────────────────
 function setupActions() {
-  // Rescan: inject content script into current tab
-  document.getElementById('btn-rescan').addEventListener('click', async () => {
+  document.getElementById('btn-rescan')?.addEventListener('click', async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id) {
-      // Clear stored analysis for this domain
-      const domain = normalizeDomain(tab.url);
-      await chrome.storage.local.remove([domain]);
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
-      setTimeout(loadAndRender, 1500);
-    }
+    if (!tab?.id) return;
+
+    const domain = normalizeDomain(tab.url);
+    await chrome.storage.local.remove([domain]);
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content.js'],
+    });
+    setTimeout(loadAndRender, 1500);
   });
 
-  // Report: open new tab with a mini HTML report
-  document.getElementById('btn-report').addEventListener('click', async () => {
+  document.getElementById('btn-report')?.addEventListener('click', async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) return;
+    if (!tab?.url) return;
+
     const domain = normalizeDomain(tab.url);
     chrome.storage.local.get([domain], (result) => {
-      const a = result[domain];
-      if (!a) return alert('No analysis available yet. Rescan the page first.');
-      const blob = new Blob([buildReportHTML(a)], { type: 'text/html' });
-      const url = URL.createObjectURL(blob);
-      chrome.tabs.create({ url });
+      const analysis = result[domain];
+      if (!analysis) {
+        alert('No analysis available yet. Rescan the page first.');
+        return;
+      }
+
+      const blob = new Blob([buildReportHTML(analysis)], { type: 'text/html' });
+      const reportUrl = URL.createObjectURL(blob);
+      chrome.tabs.create({ url: reportUrl });
     });
   });
 }
 
-// ── Backend API Integration (Bulletproof) ──────────────────────
-async function displayAIInsight(url, trackers, patterns) {
-  // 1. Force the UI box to appear immediately as 'Loading'
+async function captureVisibleScreenshot(tab) {
+  if (!tab || typeof tab.windowId !== 'number') return null;
+  try {
+    return await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+  } catch {
+    return null;
+  }
+}
+
+async function collectDomSnapshot(tabId) {
+  if (typeof tabId !== 'number') {
+    return { dom_text: '', aria_text: '' };
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const bodyText = (document.body?.innerText || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 12000);
+
+        const interactive = Array.from(document.querySelectorAll('[aria-label], button, a, [role="button"], input[type="button"], input[type="submit"]'))
+          .slice(0, 140);
+
+        const lines = interactive
+          .map((el) => {
+            const tag = (el.tagName || '').toLowerCase();
+            const role = el.getAttribute('role') || tag;
+            const aria = (el.getAttribute('aria-label') || '').trim();
+            const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            const joined = [role, aria, text].filter(Boolean).join(' | ');
+            return joined;
+          })
+          .filter(Boolean)
+          .slice(0, 120);
+
+        return {
+          dom_text: bodyText,
+          aria_text: lines.join('\n').slice(0, 7000),
+        };
+      },
+    });
+
+    return results?.[0]?.result || { dom_text: '', aria_text: '' };
+  } catch {
+    return { dom_text: '', aria_text: '' };
+  }
+}
+
+async function collectForensicMedia(tab) {
+  const [screenshotDataUrl, domSnapshot] = await Promise.all([
+    captureVisibleScreenshot(tab),
+    collectDomSnapshot(tab?.id),
+  ]);
+
+  return {
+    screenshot_data_url: screenshotDataUrl || null,
+    dom_text: domSnapshot?.dom_text || '',
+    aria_text: domSnapshot?.aria_text || '',
+  };
+}
+
+async function displayAIInsight(tab, trackers, patterns) {
+  const url = tab?.url || '';
   let insightBox = document.getElementById('ai-insight-box');
   if (!insightBox) {
     insightBox = document.createElement('div');
     insightBox.id = 'ai-insight-box';
     insightBox.style.cssText = 'background: #1e1e2e; color: #e2e8f0; border-left: 4px solid #6366f1; padding: 12px; margin-top: 15px; font-size: 13px; border-radius: 6px; line-height: 1.5; word-wrap: break-word; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
-    insightBox.innerHTML = '🤖 <strong>AI Insight:</strong> Analyzing with Gemini...';
-
-    // Append to overview tab if it exists, otherwise to body
-    const overviewTab = document.getElementById('tab-content-overview') || document.body;
-    overviewTab.appendChild(insightBox);
+    insightBox.innerHTML = '🤖 <strong>AI Insight:</strong> Analyzing...';
+    (document.getElementById('tab-content-overview') || document.body).appendChild(insightBox);
   }
 
-  // 2. Fetch from backend
   try {
-    console.log('[ConsumerShield] Calling backend for AI insight...');
+    const forensicMedia = await collectForensicMedia(tab);
+
     const response = await fetch('http://localhost:8000/analyze-complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        url: url,
+        url,
         privacy_data: { trackers: trackers || [], fingerprinting: false },
-        manipulation_data: { patterns: patterns || [] }
-      })
+        manipulation_data: { patterns: patterns || [] },
+        screenshot_data_url: forensicMedia.screenshot_data_url,
+        dom_text: forensicMedia.dom_text,
+        aria_text: forensicMedia.aria_text,
+      }),
     });
 
-    if (!response.ok) throw new Error('Backend returned status ' + response.status);
+    if (!response.ok) {
+      throw new Error(`Backend returned status ${response.status}`);
+    }
 
     const data = await response.json();
-    console.log('[ConsumerShield] AI response:', data);
-    insightBox.innerHTML = '🤖 <strong>Gemini Insight:</strong> ' + (data.combined_insight || 'No insight generated.');
-  } catch(e) {
-    insightBox.innerHTML = '🤖 <strong>AI Error:</strong> Could not connect to backend. ' + e.message;
-    console.error('[ConsumerShield] Backend error:', e);
+    const aiDetails = data?.ai_details || {};
+    const geminiText = aiDetails.gemini_insight;
+    const geminiStatus = aiDetails.gemini_status;
+    const bert = aiDetails.bert_classification;
+    const tier3 = Array.isArray(aiDetails.tier3_patterns) ? aiDetails.tier3_patterns : [];
+    const fallbackSummary = aiDetails.combined_summary || data.combined_insight || 'No insight generated.';
+
+    const geminiBlock = geminiText
+      ? `🤖 <strong>Gemini:</strong> ${escHtml(geminiText)}`
+      : `🤖 <strong>Gemini:</strong> ${escHtml(geminiStatus || 'Unavailable for this request.')}`;
+
+    let bertBlock = '🧠 <strong>BERT:</strong> No dark-pattern sample available for classification.';
+    if (bert && (bert.label || bert.confidence !== undefined)) {
+      const rawLabel = String(bert.label || 'unknown');
+      const displayLabel = rawLabel.replace(/_/g, ' ');
+      const conf = Number(bert.confidence || 0);
+      bertBlock = `🧠 <strong>BERT:</strong> ${escHtml(displayLabel)} (${conf.toFixed(1)}%)`;
+    }
+
+    const summaryBlock = !geminiText
+      ? `<div style="margin-top:8px;opacity:0.9;">⚖️ <strong>Risk Summary:</strong> ${escHtml(fallbackSummary)}</div>`
+      : '';
+
+    const severityColor = { HIGH: '#ef4444', MEDIUM: '#f59e0b', LOW: '#10b981' };
+    const tier3Block = tier3.length > 0
+      ? `<div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.1);padding-top:10px;">
+           <div style="font-size:12px;font-weight:700;letter-spacing:.05em;opacity:.7;margin-bottom:6px;">
+             🔍 FORENSIC AUDIT — TIER 3 DARK PATTERNS
+           </div>
+           ${tier3.map(p => {
+             const col = severityColor[String(p.severity || '').toUpperCase()] || '#6366f1';
+             return `<div style="margin-top:6px;padding:8px 10px;background:rgba(255,255,255,0.04);border-left:3px solid ${col};border-radius:4px;">
+               <div style="font-size:12px;font-weight:600;">${escHtml(p.pattern_name || 'Unknown')}
+                 <span style="color:${col};margin-left:6px;font-size:11px;">${escHtml(p.severity || '')}</span>
+               </div>
+               ${p.evidence_text ? `<div style="font-size:11px;margin-top:3px;opacity:.85;">📝 ${escHtml(p.evidence_text)}</div>` : ''}
+               ${p.visual_proof ? `<div style="font-size:11px;margin-top:2px;opacity:.75;">👁 ${escHtml(p.visual_proof)}</div>` : ''}
+               ${p.legal_violation ? `<div style="font-size:11px;margin-top:2px;color:#a5b4fc;">⚖️ ${escHtml(p.legal_violation)}</div>` : ''}
+             </div>`;
+           }).join('')}
+         </div>`
+      : (geminiText ? `<div style="margin-top:8px;font-size:11px;opacity:.6;">✅ No Tier 3 dark patterns flagged by forensic audit.</div>` : '');
+
+    insightBox.innerHTML = `
+      <div><strong>AI Insight</strong></div>
+      <div style="margin-top:6px;">${geminiBlock}</div>
+      <div style="margin-top:6px;">${bertBlock}</div>
+      ${summaryBlock}
+      ${tier3Block}
+    `;
+  } catch (error) {
+    insightBox.innerHTML = `🤖 <strong>AI Error:</strong> Could not connect to backend. ${escHtml(error.message)}`;
   }
 }
 
-// ── Load analysis & render ────────────────────────────────────
 async function loadAndRender() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) return;
-  const domain = normalizeDomain(tab.url);
-  const currentUrl = tab.url;
+  if (!tab?.url) return;
 
+  const domain = normalizeDomain(tab.url);
   chrome.storage.local.get([domain], async (result) => {
     const analysis = result[domain];
-    if (analysis) {
-      document.getElementById('scanning-indicator')?.classList.add('hidden');
-      renderOverview(analysis);
-      renderPrivacyTab(analysis);
-      renderManipulationTab(analysis);
-
-      // Fetch and display AI insight (bulletproof — always shows a visible box)
-      displayAIInsight(
-        currentUrl,
-        analysis.privacy?.trackers || [],
-        analysis.manipulation?.patterns || []
-      );
-    } else {
-      // Retry after 2 seconds (content script may still be running)
+    if (!analysis) {
       setTimeout(loadAndRender, 2000);
+      return;
     }
+
+    document.getElementById('scanning-indicator')?.classList.add('hidden');
+    renderOverview(analysis);
+    renderPrivacyTab(analysis);
+    renderManipulationTab(analysis);
+    animateReportPanels();
+
+    displayAIInsight(
+      tab,
+      analysis.privacy?.trackers || [],
+      analysis.manipulation?.patterns || []
+    );
   });
 }
 
+function renderOverview(analysis) {
+  const privacy = analysis.privacy || {};
+  const domainAnalysis = analysis.domain_analysis || {};
+  const networkActivity = analysis.network_activity || {};
+  const manipulation = analysis.manipulation || {};
+  const patterns = manipulation.patterns || [];
+  const privacyScore = getDisplayPrivacyScore(analysis);
+  const privacyLevel = getRiskLevelFromScore(privacyScore);
+  const manipulationScore = Number(manipulation.riskScore || 0);
+  const manipulationLevel = manipulation.riskLevel || getRiskLevelFromScore(manipulationScore);
+  const overallScore = Math.max(privacyScore, manipulationScore);
+  const overallLevel = getRiskLevelFromScore(overallScore);
+  const networkDomainCount = getNetworkDomainCount(analysis);
+  const patternCount = patterns.length;
 
+  const resolvedTrackers = (domainAnalysis.resolved_trackers || []).length > 0
+    ? (domainAnalysis.resolved_trackers || [])
+    : (privacy.trackers || []).map((item) => ({
+        domain: item.domain,
+        entity: item.name,
+        categories: [item.type],
+        privacy_score: privacy.riskScore || 2,
+      }));
+  const suspiciousDomains = domainAnalysis.suspicious_domains || [];
+  const rawDomains = networkActivity.raw_domains || [];
+  const identifiedDomainSet = new Set([
+    ...resolvedTrackers.map((item) => normalizeDomain(item.domain || item.matched_domain || '')),
+    ...suspiciousDomains.map((item) => normalizeDomain(item.domain || '')),
+  ].filter(Boolean));
+  const otherBackgroundRequests = rawDomains.filter((domain) => !identifiedDomainSet.has(normalizeDomain(domain)));
 
-// ── Overview tab ──────────────────────────────────────────────
-function renderOverview(a) {
-  const p = a.privacy;
-  const m = a.manipulation;
-  const o = a.overall;
-  const trackerCount = a.domain_analysis?.resolved_trackers?.length ?? p.trackers?.length ?? 0;
-
-  // Privacy score card
-  setScore('privacy', p.riskScore, p.riskLevel);
-
-  // Manipulation score card
-  setScore('manipulation', m.riskScore, m.riskLevel);
-
-  // Overall card
-  const overallEl = document.getElementById('overall-value');
-  const overallLvl = document.getElementById('overall-level');
-  const progressFill = document.getElementById('progress-fill');
-  if (overallEl) overallEl.textContent = o.riskScore.toFixed(1);
-  if (overallLvl) {
-    overallLvl.textContent = o.riskLevel;
-    overallLvl.className = `overall-level level-${o.riskLevel}`;
+  const heroTone = getHeroTone(overallScore);
+  const hero = document.getElementById('dashboard-hero');
+  if (hero) {
+    hero.classList.remove('risk-green', 'risk-yellow', 'risk-red');
+    hero.classList.add(`risk-${heroTone}`);
   }
-  if (progressFill) progressFill.style.width = `${(o.riskScore / 10) * 100}%`;
 
-  const insightEl = document.getElementById('overall-insight');
-  if (insightEl) insightEl.textContent = o.insight || a.aiInsight || 'Analysis complete. Fetching AI insight...';
+  const heroLevel = document.getElementById('hero-risk-level');
+  if (heroLevel) {
+    heroLevel.classList.remove('risk-green', 'risk-yellow', 'risk-red');
+    heroLevel.classList.add(`risk-${heroTone}`);
+  }
 
-  // Stats
-  setText('stat-trackers',   trackerCount);
-  setText('stat-patterns',   m.patterns?.length ?? 0);
-  setText('stat-violations', o.totalViolations ?? 0);
+  const heroGauge = document.getElementById('hero-gauge-progress');
+  setCircularGauge(heroGauge, overallScore, heroTone);
 
-  // Tab badges
-  setBadge('badge-privacy',      p.riskScore, p.riskLevel);
-  setBadge('badge-manipulation', m.riskScore, m.riskLevel);
+  setText('hero-risk-score', overallScore.toFixed(1));
+  setText('hero-risk-level', overallLevel);
+  setText('hero-domain-count', networkDomainCount);
+  setText('hero-pattern-count', patternCount);
 
-  // Laws
-  const laws = new Set();
-  if (trackerCount > 0) laws.add('Digital Personal Data Protection Act 2023 (DPDP)');
-  if (p.policy?.thirdPartySharing || p.policy?.noOptOut) laws.add('DPDP Act 2023 — Section 6, 8, 12');
-  if ((m.patterns?.length ?? 0) > 0) laws.add('CCPA Dark Patterns Guidelines 2023');
-  if ((m.patterns?.some(p => ['urgency','sneaking'].includes(p.type)))) laws.add('Consumer Protection Act 2019 — Section 2(47)');
+  setBadge('badge-privacy', privacyScore, privacyLevel);
+  setBadge('badge-manipulation', manipulationScore, manipulationLevel);
+
+  setText('privacy-card-score', `${privacyScore.toFixed(1)}/10`);
+  const privacyFill = document.getElementById('privacy-card-fill');
+  if (privacyFill) {
+    privacyFill.style.width = `${Math.max(0, Math.min(100, privacyScore * 10))}%`;
+    privacyFill.classList.remove('risk-green', 'risk-yellow', 'risk-red');
+    privacyFill.classList.add(`risk-${getHeroTone(privacyScore)}`);
+  }
+
+  const topEntities = [...resolvedTrackers]
+    .sort((a, b) => Number(b.privacy_score || 0) - Number(a.privacy_score || 0))
+    .slice(0, 5);
+  const entityList = document.getElementById('identified-entities-list');
+  if (entityList) {
+    if (topEntities.length === 0) {
+      entityList.innerHTML = '<div class="empty-state">No identified entities yet.</div>';
+    } else {
+      entityList.innerHTML = topEntities.map((entity) => {
+        const type = inferTrackerType(entity);
+        const icon = TRACKER_ICONS[type] || TRACKER_ICONS.tracker;
+        const score = Number(entity.privacy_score || 0);
+        return `
+          <div class="entity-row report-card">
+            <div class="company-badge">${escHtml(companyInitials(entity.entity || entity.displayName || 'Unknown'))}</div>
+            <div class="entity-icon">${icon}</div>
+            <div class="entity-main">
+              <div class="entity-name">${escHtml(entity.entity || entity.displayName || 'Unknown Entity')}</div>
+              <div class="entity-domain code-domain">${escHtml(entity.domain || '')}</div>
+            </div>
+            <div class="risk-badge ${getRiskBucket(score)}">${score.toFixed(1)}</div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  setText('suspicious-count-chip', `${suspiciousDomains.length} flagged`);
+  const suspiciousList = document.getElementById('suspicious-activity-list');
+  if (suspiciousList) {
+    if (suspiciousDomains.length === 0) {
+      suspiciousList.innerHTML = '<div class="empty-state">No suspicious domains flagged yet.</div>';
+    } else {
+      suspiciousList.innerHTML = suspiciousDomains.map((item) => {
+        const tag = getSuspiciousKeywordTag(item.reasons || []);
+        return `
+          <div class="suspicious-row report-card">
+            <span class="code-domain">${escHtml(item.domain || '')}</span>
+            <span class="suspicious-tag">${escHtml(tag)}</span>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  setText('manipulation-card-score', `${manipulationScore.toFixed(1)}/10`);
+  const manipulationList = document.getElementById('manipulation-severity-list');
+  if (manipulationList) {
+    if (patterns.length === 0) {
+      manipulationList.innerHTML = '<div class="safe-state">✅ No dark patterns detected</div>';
+    } else {
+      manipulationList.innerHTML = patterns.map((pattern) => {
+        const severity = String(pattern.severity || 'low').toLowerCase();
+        const normalizedSeverity = severity === 'high' ? 'high' : severity === 'medium' ? 'medium' : 'low';
+        const citation = getPatternCitation(pattern.type);
+        return `
+          <div class="severity-card severity-${normalizedSeverity} report-card">
+            <div class="severity-head">
+              <span>${SEVERITY_ICONS[normalizedSeverity] || '⚠️'} ${escHtml(pattern.name || 'Dark Pattern')}</span>
+              <span class="item-badge badge-${normalizedSeverity}">${escHtml(normalizedSeverity)}</span>
+            </div>
+            <div class="severity-detail">${escHtml(pattern.description || 'Manipulative behavior detected.')}</div>
+            <div class="severity-citation">${escHtml(citation)}</div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  const networkLogCount = document.getElementById('network-log-count');
+  if (networkLogCount) {
+    networkLogCount.textContent = `${otherBackgroundRequests.length} requests`;
+  }
+  const networkLogList = document.getElementById('network-log-list');
+  if (networkLogList) {
+    if (otherBackgroundRequests.length === 0) {
+      networkLogList.innerHTML = '<div class="empty-state">No additional background requests.</div>';
+    } else {
+      networkLogList.innerHTML = otherBackgroundRequests.map((domain) => `
+        <div class="network-log-row">
+          <span class="code-domain">${escHtml(domain)}</span>
+        </div>
+      `).join('');
+    }
+  }
+
+  const insight = document.getElementById('overall-insight');
+  if (insight) {
+    if (networkDomainCount > 0) {
+      insight.textContent = `Live scan found ${networkDomainCount} unique domains and ${patternCount} dark pattern signal(s).`;
+    } else {
+      insight.textContent = analysis.overall?.insight || analysis.aiInsight || 'Analysis complete. Fetching AI insight...';
+    }
+  }
+
+  const lawItems = new Set();
+  if (networkDomainCount > 0) lawItems.add('Digital Personal Data Protection Act 2023 (DPDP)');
+  if (privacy.policy?.thirdPartySharing || privacy.policy?.noOptOut) lawItems.add('DPDP Act 2023 — Section 6, 8, 12');
+  if (patternCount > 0) lawItems.add('CCPA Dark Patterns Guidelines 2023');
+  if (patterns.some((item) => ['urgency', 'sneaking'].includes(item.type))) lawItems.add('Consumer Protection Act 2019 — Section 2(47)');
 
   const lawsSection = document.getElementById('laws-section');
   const lawsList = document.getElementById('laws-list');
-  if (laws.size > 0 && lawsSection && lawsList) {
-    lawsSection.style.display = 'block';
-    lawsList.innerHTML = [...laws].map(l => `<div class="law-tag">⚖️ ${l}</div>`).join('');
+  if (lawsSection && lawsList) {
+    if (lawItems.size === 0) {
+      lawsSection.style.display = 'none';
+      lawsList.innerHTML = '';
+    } else {
+      lawsSection.style.display = 'block';
+      lawsList.innerHTML = [...lawItems].map((law) => `<div class="law-tag">⚖️ ${escHtml(law)}</div>`).join('');
+    }
   }
+
+  animateContainerItems(document.getElementById('identified-entities-list'));
+  animateContainerItems(document.getElementById('suspicious-activity-list'));
+  animateContainerItems(document.getElementById('manipulation-severity-list'));
+}
+
+function getHeroTone(score) {
+  if (score >= 7) return 'red';
+  if (score >= 4) return 'yellow';
+  return 'green';
+}
+
+function setCircularGauge(circleNode, score, tone) {
+  if (!circleNode) return;
+  const radius = 64;
+  const circumference = 2 * Math.PI * radius;
+  const normalizedScore = Math.max(0, Math.min(10, Number(score) || 0));
+  const progress = normalizedScore / 10;
+  const offset = circumference - (progress * circumference);
+
+  circleNode.style.strokeDasharray = `${circumference} ${circumference}`;
+  circleNode.style.strokeDashoffset = `${offset}`;
+  circleNode.classList.remove('risk-green', 'risk-yellow', 'risk-red');
+  circleNode.classList.add(`risk-${tone}`);
+}
+
+function getSuspiciousKeywordTag(reasons) {
+  const reasonList = Array.isArray(reasons) ? reasons : [];
+  const keywordMatch = reasonList.find((reason) => String(reason).toLowerCase().startsWith('keyword:'));
+  if (keywordMatch) {
+    const keyword = String(keywordMatch).split(':')[1] || '';
+    return `KEYWORD: ${keyword.trim().toUpperCase() || 'TRACKER'}`;
+  }
+  return 'KEYWORD: HEURISTIC';
+}
+
+function getPatternCitation(type) {
+  const citations = {
+    urgency: '⚖️ Violation: DPDP Act 2023 Sec. 6.',
+    sneaking: '⚖️ Violation: CCPA Dark Patterns Guidelines 2023.',
+    confirmshaming: '⚖️ Violation: Consumer Protection Act 2019 Sec. 2(47).',
+    trick_questions: '⚖️ Violation: CCPA Dark Patterns Guidelines 2023.',
+    forced_continuity: '⚖️ Violation: Consumer Protection Act 2019 Sec. 2(47).',
+    disguised_ads: '⚖️ Violation: CCPA Dark Patterns Guidelines 2023.',
+    preselected: '⚖️ Violation: DPDP Act 2023 Sec. 6.',
+    obstruction: '⚖️ Violation: Consumer Protection Act 2019 Sec. 2(47).',
+  };
+  return citations[type] || '⚖️ Violation: Consumer Protection Act 2019 Sec. 2(47).';
 }
 
 function setScore(type, score, level) {
-  const valEl = document.getElementById(`score-${type}`);
-  const lvlEl = document.getElementById(`level-${type}`);
-  if (valEl) valEl.textContent = score?.toFixed(1) ?? '–';
-  if (lvlEl) {
-    lvlEl.textContent = level || '–';
-    lvlEl.className = `score-level level-${level || 'Scanning'}`;
+  const scoreNode = document.getElementById(`score-${type}`);
+  const levelNode = document.getElementById(`level-${type}`);
+  const numeric = Number(score || 0);
+  if (scoreNode) scoreNode.textContent = numeric.toFixed(1);
+  if (levelNode) {
+    levelNode.textContent = level || 'SAFE';
+    levelNode.className = `score-level level-${level || 'SAFE'}`;
   }
 }
 
 function setBadge(id, score, level) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.textContent = score?.toFixed(1) ?? '–';
-  el.className = 'tab-badge';
-  if (level === 'CRITICAL' || level === 'HIGH') el.classList.add('danger');
-  else if (level === 'MEDIUM') el.classList.add('high');
-  else if (level === 'LOW') el.classList.add('medium');
-  else el.classList.add('ok');
+  const badge = document.getElementById(id);
+  if (!badge) return;
+
+  badge.textContent = Number(score || 0).toFixed(1);
+  badge.className = 'tab-badge';
+  if (level === 'CRITICAL' || level === 'HIGH') badge.classList.add('danger');
+  else if (level === 'MEDIUM') badge.classList.add('high');
+  else if (level === 'LOW') badge.classList.add('medium');
+  else badge.classList.add('ok');
 }
 
-function getGaugeTone(score) {
-  if (score >= 7) return { label: 'High Exposure', bucket: 'high' };
-  if (score >= 4) return { label: 'Moderate Exposure', bucket: 'medium' };
-  return { label: 'Low Exposure', bucket: 'low' };
+function getDisplayPrivacyScore(analysis) {
+  const score = Number(analysis.domain_analysis?.total_privacy_score);
+  if (Number.isFinite(score)) return score;
+  return Number(analysis.privacy?.riskScore || 0);
+}
+
+function getNetworkDomainCount(analysis) {
+  return analysis.network_activity?.unique_domain_count
+    ?? analysis.domain_analysis?.resolved_trackers?.length
+    ?? analysis.privacy?.trackers?.length
+    ?? 0;
+}
+
+function getRiskLevelFromScore(score) {
+  if (score >= 8.5) return 'CRITICAL';
+  if (score >= 6.5) return 'HIGH';
+  if (score >= 4.0) return 'MEDIUM';
+  if (score >= 2.0) return 'LOW';
+  return 'SAFE';
+}
+
+function getRiskTone(score) {
+  if (score >= 7) return { label: 'High Exposure', key: 'risk-high' };
+  if (score >= 4) return { label: 'Medium Exposure', key: 'risk-med' };
+  return { label: 'Low Exposure', key: 'risk-low' };
 }
 
 function getRiskBucket(score) {
@@ -219,15 +524,61 @@ function getRiskBucket(score) {
   return 'low';
 }
 
+function renderHorizontalGauge(title, score) {
+  const safeScore = Number.isFinite(Number(score)) ? Number(score) : 0;
+  const tone = getRiskTone(safeScore);
+  const width = Math.max(0, Math.min(100, (safeScore / 10) * 100));
+  return `
+    <div class="security-gauge report-card ${tone.key}">
+      <div class="security-gauge-head">
+        <span>${escHtml(title)}</span>
+        <span>${safeScore.toFixed(1)}/10 • ${tone.label}</span>
+      </div>
+      <div class="security-gauge-track">
+        <div class="security-gauge-fill ${tone.key}" style="width:${width}%"></div>
+      </div>
+    </div>
+  `;
+}
+
+function companyInitials(name) {
+  const text = String(name || '').trim();
+  if (!text) return '??';
+  return text
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((word) => (word[0] || '').toUpperCase())
+    .join('') || '??';
+}
+
+function animateContainerItems(container) {
+  if (!container) return;
+  const items = Array.from(container.querySelectorAll('.report-card'));
+  items.forEach((item, index) => {
+    item.classList.remove('fade-in-item');
+    item.style.animationDelay = `${index * 40}ms`;
+    item.classList.add('fade-in-item');
+  });
+}
+
+function animateReportPanels() {
+  document.querySelectorAll('.tab-content').forEach((panel, index) => {
+    panel.classList.remove('report-fade-in');
+    void panel.offsetWidth;
+    panel.style.animationDelay = `${index * 50}ms`;
+    panel.classList.add('report-fade-in');
+  });
+}
+
 function inferTrackerType(entry) {
   const categories = Array.isArray(entry?.categories)
-    ? entry.categories.map(c => String(c).toLowerCase())
+    ? entry.categories.map((item) => String(item).toLowerCase())
     : [];
 
-  if (categories.some(c => c.includes('advert'))) return 'advertising';
-  if (categories.some(c => c.includes('social'))) return 'social';
-  if (categories.some(c => c.includes('analytic') || c.includes('measurement') || c.includes('telemetry'))) return 'analytics';
-  if (categories.some(c => c.includes('broker') || c.includes('fingerprint'))) return 'data_broker';
+  if (categories.some((item) => item.includes('advert'))) return 'advertising';
+  if (categories.some((item) => item.includes('social'))) return 'social';
+  if (categories.some((item) => item.includes('analytic') || item.includes('measurement') || item.includes('telemetry'))) return 'analytics';
+  if (categories.some((item) => item.includes('broker') || item.includes('fingerprint'))) return 'data_broker';
   return 'tracker';
 }
 
@@ -238,33 +589,45 @@ function prettyReason(reason) {
     .replace(/-/g, ' ');
 }
 
-// ── Privacy tab ───────────────────────────────────────────────
-function renderPrivacyTab(a) {
-  const p = a.privacy || {};
-  const domainAnalysis = a.domain_analysis || {};
-  const resolvedTrackers = domainAnalysis.resolved_trackers || [];
+function formatTrafficLabel(count) {
+  return count === 1 ? '1 Tracking Request Observed' : `${count} Tracking Requests Observed`;
+}
+
+function renderPrivacyTab(analysis) {
+  const privacy = analysis.privacy || {};
+  const networkActivity = analysis.network_activity || {};
+  const domainAnalysis = analysis.domain_analysis || {};
+  const resolvedTrackers = (domainAnalysis.resolved_trackers || []).length > 0
+    ? (domainAnalysis.resolved_trackers || [])
+    : (privacy.trackers || []).map((item) => ({
+        domain: item.domain,
+        entity: item.name,
+        categories: [item.type],
+        privacy_score: privacy.riskScore || 2,
+      }));
   const suspiciousDomains = domainAnalysis.suspicious_domains || [];
-  const privacyScore = typeof domainAnalysis.total_privacy_score === 'number'
-    ? domainAnalysis.total_privacy_score
-    : (p.riskScore || 0);
+  const rawDomains = networkActivity.raw_domains || [];
+  const identifiedDomainSet = new Set([
+    ...resolvedTrackers.map((item) => normalizeDomain(item.domain || item.matched_domain || '')),
+    ...suspiciousDomains.map((item) => normalizeDomain(item.domain || '')),
+  ].filter(Boolean));
+  const otherBackgroundRequests = rawDomains.filter((domain) => !identifiedDomainSet.has(normalizeDomain(domain)));
+  const privacyScore = getDisplayPrivacyScore(analysis);
+  const requestCount = networkActivity.total_request_count || rawDomains.length;
+  const uniqueDomainCount = networkActivity.unique_domain_count || rawDomains.length;
 
-  const tone = getGaugeTone(privacyScore);
-  const gaugeWidth = Math.max(0, Math.min(100, (privacyScore / 10) * 100));
-
-  // Tracker intelligence (known + heuristic)
   const trackerList = document.getElementById('tracker-list');
   if (trackerList) {
-    const knownHtml = resolvedTrackers.map(t => {
-      const type = inferTrackerType(t);
-      const icon = TRACKER_ICONS[type] || '🛰️';
-      const displayName = t.entity || t.displayName || 'Unknown Entity';
-      const riskScore = Number(t.privacy_score || 0);
+    const knownHtml = resolvedTrackers.map((item) => {
+      const type = inferTrackerType(item);
+      const displayName = item.entity || item.displayName || 'Unknown Entity';
+      const riskScore = Number(item.privacy_score || 0);
       return `
-        <div class="tracker-item tracker-item--entity">
-          <div class="item-icon">${icon}</div>
+        <div class="tracker-item tracker-item--entity report-card">
+          <div class="company-badge">${escHtml(companyInitials(displayName))}</div>
           <div class="item-body">
             <div class="item-name">${escHtml(displayName)}</div>
-            <div class="item-sub">${escHtml(t.domain || '')}</div>
+            <div class="item-sub">${escHtml(item.domain || '')}</div>
           </div>
           <div class="item-badge badge-${type}">${escHtml(type)}</div>
           <div class="risk-badge ${getRiskBucket(riskScore)}">${riskScore.toFixed(1)}</div>
@@ -272,15 +635,15 @@ function renderPrivacyTab(a) {
       `;
     }).join('');
 
-    const suspiciousHtml = suspiciousDomains.map(d => {
-      const riskScore = Number(d.privacy_score || 0);
-      const reasons = (d.reasons || []).map(prettyReason).join(', ');
+    const suspiciousHtml = suspiciousDomains.map((item) => {
+      const riskScore = Number(item.privacy_score || 0);
+      const reasons = (item.reasons || []).map(prettyReason).join(', ');
       return `
-        <div class="tracker-item tracker-item--alert">
+        <div class="tracker-item tracker-item--alert report-card">
           <div class="item-icon">⚠️</div>
           <div class="item-body">
             <div class="item-name">Unidentified Tracking Behavior</div>
-            <div class="item-sub">${escHtml(d.domain || '')}</div>
+            <div class="item-sub">${escHtml(item.domain || '')}</div>
             <div class="item-sub">${escHtml(reasons || 'Heuristic anomaly')}</div>
           </div>
           <div class="risk-badge ${getRiskBucket(riskScore)}">${riskScore.toFixed(1)}</div>
@@ -288,204 +651,715 @@ function renderPrivacyTab(a) {
       `;
     }).join('');
 
+    const otherRequestHtml = otherBackgroundRequests.map((domain) => `
+      <div class="background-request-item">
+        <span class="background-request-domain">${escHtml(domain)}</span>
+      </div>
+    `).join('');
+
     const hasKnown = resolvedTrackers.length > 0;
     const hasSuspicious = suspiciousDomains.length > 0;
+    const hasOther = otherBackgroundRequests.length > 0;
 
     trackerList.innerHTML = `
-      <div class="privacy-gauge ${tone.bucket}">
-        <div class="privacy-gauge-head">
-          <span>Privacy Health Meter</span>
-          <span>${privacyScore.toFixed(1)}/10 • ${tone.label}</span>
+      <div class="traffic-monitor report-card">
+        <div class="traffic-monitor-head">
+          <span class="live-traffic-label"><span class="live-dot"></span>Live Traffic Monitor</span>
+          <span>${uniqueDomainCount} unique domains</span>
         </div>
-        <div class="privacy-gauge-track">
-          <div class="privacy-gauge-fill ${tone.bucket}" style="width:${gaugeWidth}%"></div>
-        </div>
+        <div class="traffic-counter">${requestCount}</div>
+        <div class="traffic-subtext">${escHtml(formatTrafficLabel(requestCount))}</div>
       </div>
 
-      <div class="privacy-subheading">Known Trackers</div>
-      ${hasKnown ? knownHtml : '<div class="empty-state">No known tracker entities matched.</div>'}
+      ${renderHorizontalGauge('Privacy Risk Gauge', privacyScore)}
 
-      <div class="privacy-subheading">Unidentified Tracking Behavior</div>
-      ${hasSuspicious ? suspiciousHtml : '<div class="empty-state">No heuristic alerts.</div>'}
+      <div class="privacy-subheading">Identified Entities</div>
+      ${hasKnown ? knownHtml : '<div class="empty-state">No identified entities yet.</div>'}
 
-      ${(!hasKnown && !hasSuspicious)
-        ? '<div class="safe-state">🛡️ Your Privacy is Protected</div>'
-        : ''}
+      <details class="background-requests report-card" ${hasSuspicious ? 'open' : ''}>
+        <summary>Other Background Requests (${otherBackgroundRequests.length + suspiciousDomains.length})</summary>
+        <div class="background-request-body">
+          <div class="privacy-subheading">AI-Flagged Suspicious Domains</div>
+          ${hasSuspicious ? suspiciousHtml : '<div class="empty-state">No heuristic alerts.</div>'}
+
+          <div class="privacy-subheading">Other Background Requests</div>
+          ${hasOther ? otherRequestHtml : '<div class="empty-state">No additional background requests.</div>'}
+        </div>
+      </details>
+
+      ${(!hasKnown && !hasSuspicious && !hasOther) ? '<div class="safe-state">🛡️ Your Privacy is Protected</div>' : ''}
     `;
+
+    animateContainerItems(trackerList);
   }
 
-  // Policy flags
-  const policyList = document.getElementById('policy-list');
-  const flags = [];
-  if (p.policy?.thirdPartySharing) flags.push({ icon: '🔗', label: 'Third-party data sharing detected', detail: 'Your data is shared with external partners.' });
-  if (p.policy?.noOptOut)          flags.push({ icon: '🚫', label: 'No opt-out mechanism found', detail: 'You cannot easily withdraw consent.' });
-  if (p.policy?.extensiveCollection) flags.push({ icon: '📦', label: 'Extensive data collection', detail: 'Site collects location, device, browsing data etc.' });
-  if (p.fingerprinting)            flags.push({ icon: '🖼️', label: 'Canvas fingerprinting detected', detail: 'Site attempts to generate a unique ID from your browser.' });
+  const policyFlags = [];
+  if (privacy.policy?.thirdPartySharing) {
+    policyFlags.push({ icon: '🔗', label: 'Third-party data sharing detected', detail: 'Your data is shared with external partners.' });
+  }
+  if (privacy.policy?.noOptOut) {
+    policyFlags.push({ icon: '🚫', label: 'No opt-out mechanism found', detail: 'You cannot easily withdraw consent.' });
+  }
+  if (privacy.policy?.extensiveCollection) {
+    policyFlags.push({ icon: '📦', label: 'Extensive data collection', detail: 'Site collects location, device, browsing, or purchase data.' });
+  }
+  if (privacy.fingerprinting) {
+    policyFlags.push({ icon: '🖼️', label: 'Canvas fingerprinting detected', detail: 'Site attempts to derive a unique browser fingerprint.' });
+  }
 
+  const policyList = document.getElementById('policy-list');
   if (policyList) {
-    if (flags.length === 0) {
+    if (policyFlags.length === 0) {
       policyList.innerHTML = '<div class="safe-state">✅ No major policy issues detected</div>';
     } else {
-      policyList.innerHTML = flags.map(f => `
-        <div class="policy-item">
-          <div class="item-icon">${f.icon}</div>
+      policyList.innerHTML = policyFlags.map((flag) => `
+        <div class="policy-item report-card">
+          <div class="item-icon">${flag.icon}</div>
           <div class="item-body">
-            <div class="item-name">${f.label}</div>
-            <div class="item-sub">${f.detail}</div>
+            <div class="item-name">${escHtml(flag.label)}</div>
+            <div class="item-sub">${escHtml(flag.detail)}</div>
           </div>
         </div>
       `).join('');
     }
+
+    animateContainerItems(policyList);
   }
 
-  // Legal exposure
-  const legalList = document.getElementById('privacy-legal-list');
-  if (legalList) {
-    const items = buildPrivacyLegalItems(p);
-    if (items.length === 0) {
-      legalList.innerHTML = '<div class="empty-state">No violations mapped</div>';
+  const privacyLegalList = document.getElementById('privacy-legal-list');
+  if (privacyLegalList) {
+    const legalItems = buildPrivacyLegalItems(privacy, uniqueDomainCount);
+    if (legalItems.length === 0) {
+      privacyLegalList.innerHTML = '<div class="empty-state">No violations mapped</div>';
     } else {
-      legalList.innerHTML = items.map(i => `
-        <div class="legal-item">
-          <div class="legal-law">⚖️ ${escHtml(i.law)}</div>
-          <div class="legal-detail">${escHtml(i.section)} — ${escHtml(i.issue)}</div>
-          <div class="legal-penalty">Max Penalty: ${escHtml(i.penalty)}</div>
+      privacyLegalList.innerHTML = legalItems.map((item) => `
+        <div class="legal-item report-card">
+          <div class="legal-law">⚖️ ${escHtml(item.law)}</div>
+          <div class="legal-detail">${escHtml(item.section)} — ${escHtml(item.issue)}</div>
+          <div class="legal-penalty">Max Penalty: ${escHtml(item.penalty)}</div>
         </div>
       `).join('');
     }
+
+    animateContainerItems(privacyLegalList);
   }
 }
 
-function buildPrivacyLegalItems(p) {
+function buildPrivacyLegalItems(privacy, trackerExposureCount = 0) {
   const items = [];
-  if ((p.trackers?.length ?? 0) > 0) {
+  if (trackerExposureCount > 0 || (privacy.trackers?.length || 0) > 0) {
     items.push({ law: 'DPDP Act 2023', section: 'Section 6', issue: 'Tracking without explicit consent', penalty: '₹250 crore' });
   }
-  if (p.policy?.thirdPartySharing) {
+  if (privacy.policy?.thirdPartySharing) {
     items.push({ law: 'DPDP Act 2023', section: 'Section 8', issue: 'Third-party data sharing obligations', penalty: '₹250 crore' });
   }
-  if (p.policy?.noOptOut) {
+  if (privacy.policy?.noOptOut) {
     items.push({ law: 'DPDP Act 2023', section: 'Section 12', issue: 'Right to withdraw consent not provided', penalty: '₹250 crore' });
   }
-  if (p.fingerprinting) {
+  if (privacy.fingerprinting) {
     items.push({ law: 'IT Act 2000', section: 'Section 43A', issue: 'Unauthorized data collection via fingerprinting', penalty: '₹5 crore+' });
   }
   return items;
 }
 
-// ── Manipulation tab ──────────────────────────────────────────
-function renderManipulationTab(a) {
-  const m = a.manipulation;
-
-  // Pattern list
+function renderManipulationTab(analysis) {
+  const manipulation = analysis.manipulation || {};
+  const manipulationScore = Number(manipulation.riskScore || 0);
   const patternList = document.getElementById('pattern-list');
   if (patternList) {
-    if ((m.patterns?.length ?? 0) === 0) {
-      patternList.innerHTML = '<div class="safe-state">✅ No dark patterns detected</div>';
+    const patterns = manipulation.patterns || [];
+    if (patterns.length === 0) {
+      patternList.innerHTML = `
+        ${renderHorizontalGauge('Manipulation Risk Gauge', manipulationScore)}
+        <div class="safe-state report-card">✅ No dark patterns detected</div>
+      `;
     } else {
-      patternList.innerHTML = m.patterns.map(p => `
-        <div class="pattern-item">
-          <div class="item-icon">${SEVERITY_ICONS[p.severity] || '⚠️'}</div>
-          <div class="item-body">
-            <div class="item-name">${escHtml(p.name)}</div>
-            <div class="item-sub">${escHtml(p.description || '')}</div>
-            ${p.text ? `<div class="item-sub" style="margin-top:3px;font-style:italic;opacity:0.6;">"${escHtml(p.text.slice(0,70))}…"</div>` : ''}
+      const cards = patterns.map((item) => {
+        const severity = String(item.severity || 'low').toLowerCase();
+        const riskClass = severity === 'high' ? 'risk-high' : severity === 'medium' ? 'risk-med' : 'risk-low';
+        return `
+          <div class="pattern-item manipulation-card report-card ${riskClass}">
+            <div class="item-icon">${SEVERITY_ICONS[severity] || '⚠️'}</div>
+            <div class="item-body">
+              <div class="item-name">${escHtml(item.name)}</div>
+              <div class="item-sub">${escHtml(item.description || '')}</div>
+              ${item.text ? `<div class="item-sub" style="margin-top:3px;font-style:italic;opacity:0.75;">&quot;${escHtml(String(item.text).slice(0, 90))}${String(item.text).length > 90 ? '…' : ''}&quot;</div>` : ''}
+            </div>
+            <div class="item-badge badge-${severity}">${escHtml(severity)}</div>
           </div>
-          <div class="item-badge badge-${p.severity}">${p.severity}</div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
+
+      patternList.innerHTML = `
+        ${renderHorizontalGauge('Manipulation Risk Gauge', manipulationScore)}
+        <div class="privacy-subheading">Dark Pattern Security Cards</div>
+        ${cards}
+      `;
     }
+
+    animateContainerItems(patternList);
   }
 
-  // Legal exposure
-  const legalList = document.getElementById('manipulation-legal-list');
-  if (legalList) {
-    const items = buildManipulationLegalItems(m);
-    if (items.length === 0) {
-      legalList.innerHTML = '<div class="empty-state">No violations mapped</div>';
+  const manipulationLegalList = document.getElementById('manipulation-legal-list');
+  if (manipulationLegalList) {
+    const legalItems = buildManipulationLegalItems(manipulation);
+    if (legalItems.length === 0) {
+      manipulationLegalList.innerHTML = '<div class="empty-state">No violations mapped</div>';
     } else {
-      legalList.innerHTML = items.map(i => `
-        <div class="legal-item">
-          <div class="legal-law">⚖️ ${escHtml(i.law)}</div>
-          <div class="legal-detail">${escHtml(i.section)} — ${escHtml(i.issue)}</div>
-          <div class="legal-penalty">Penalty: ${escHtml(i.penalty)}</div>
+      manipulationLegalList.innerHTML = legalItems.map((item) => `
+        <div class="legal-item report-card">
+          <div class="legal-law">⚖️ ${escHtml(item.law)}</div>
+          <div class="legal-detail">${escHtml(item.section)} — ${escHtml(item.issue)}</div>
+          <div class="legal-penalty">Penalty: ${escHtml(item.penalty)}</div>
         </div>
       `).join('');
     }
+
+    animateContainerItems(manipulationLegalList);
   }
 }
 
-function buildManipulationLegalItems(m) {
+function buildManipulationLegalItems(manipulation) {
   const legalMap = {
-    urgency:          { law: 'CCPA Guidelines 2023', section: 'False Urgency',        issue: 'Creating artificial scarcity/time pressure', penalty: '₹10 lakh – ₹50 lakh' },
-    sneaking:         { law: 'CCPA Guidelines 2023', section: 'Drip Pricing',         issue: 'Hidden charges not disclosed upfront',        penalty: '₹25 lakh – ₹50 lakh' },
-    confirmshaming:   { law: 'CCPA Guidelines 2023', section: 'Confirmshaming',       issue: 'Guilt-based language to force acceptance',    penalty: '₹10 lakh – ₹25 lakh' },
-    trick_questions:  { law: 'CCPA Guidelines 2023', section: 'Trick Questions',      issue: 'Double negatives on consent forms',           penalty: '₹10 lakh – ₹25 lakh' },
-    forced_continuity:{ law: 'CCPA Guidelines 2023', section: 'Forced Continuity',   issue: 'Auto-renewal without clear notice',           penalty: '₹25 lakh – ₹50 lakh' },
-    disguised_ads:    { law: 'CCPA Guidelines 2023', section: 'Disguised Ads',        issue: 'Ads presented as organic content',           penalty: '₹10 lakh – ₹25 lakh' },
-    preselected:      { law: 'CCPA Guidelines 2023', section: 'Pre-selected Options', issue: 'Harmful options pre-checked without consent', penalty: '₹10 lakh – ₹25 lakh' },
-    obstruction:      { law: 'CCPA Guidelines 2023', section: 'Obstruction',          issue: 'Making cancellation deliberately difficult',  penalty: '₹25 lakh – ₹50 lakh' },
+    urgency: { law: 'CCPA Guidelines 2023', section: 'False Urgency', issue: 'Creating artificial scarcity or time pressure', penalty: '₹10 lakh – ₹50 lakh' },
+    sneaking: { law: 'CCPA Guidelines 2023', section: 'Drip Pricing', issue: 'Hidden charges not disclosed upfront', penalty: '₹25 lakh – ₹50 lakh' },
+    confirmshaming: { law: 'CCPA Guidelines 2023', section: 'Confirmshaming', issue: 'Guilt-based language to force acceptance', penalty: '₹10 lakh – ₹25 lakh' },
+    trick_questions: { law: 'CCPA Guidelines 2023', section: 'Trick Questions', issue: 'Double negatives on consent forms', penalty: '₹10 lakh – ₹25 lakh' },
+    forced_continuity: { law: 'CCPA Guidelines 2023', section: 'Forced Continuity', issue: 'Auto-renewal without clear notice', penalty: '₹25 lakh – ₹50 lakh' },
+    disguised_ads: { law: 'CCPA Guidelines 2023', section: 'Disguised Ads', issue: 'Ads presented as organic content', penalty: '₹10 lakh – ₹25 lakh' },
+    preselected: { law: 'CCPA Guidelines 2023', section: 'Pre-selected Options', issue: 'Harmful options pre-checked without consent', penalty: '₹10 lakh – ₹25 lakh' },
+    obstruction: { law: 'CCPA Guidelines 2023', section: 'Obstruction', issue: 'Making cancellation deliberately difficult', penalty: '₹25 lakh – ₹50 lakh' },
   };
+
   const seen = new Set();
   const items = [];
-  (m.patterns || []).forEach(p => {
-    const info = legalMap[p.type];
-    if (info && !seen.has(p.type)) {
-      seen.add(p.type);
-      items.push(info);
+  (manipulation.patterns || []).forEach((pattern) => {
+    const mapped = legalMap[pattern.type];
+    if (mapped && !seen.has(pattern.type)) {
+      seen.add(pattern.type);
+      items.push(mapped);
     }
   });
+
   if (items.length > 0) {
     items.push({ law: 'Consumer Protection Act 2019', section: 'Section 2(47)', issue: 'Unfair trade practice', penalty: '₹10 lakh – ₹50 lakh' });
   }
   return items;
 }
 
-// ── Report HTML builder ───────────────────────────────────────
-function buildReportHTML(a) {
-  const date = new Date(a.timestamp).toLocaleString('en-IN');
-  const trackers = (a.privacy.trackers || []).map(t => `<li>${t.name} (${t.domain}) — ${t.type}</li>`).join('');
-  const patterns = (a.manipulation.patterns || []).map(p => `<li><b>${p.name}</b> [${p.severity}] — ${p.description}</li>`).join('');
+function buildReportHTML(analysis) {
+  const date = new Date(analysis.timestamp).toLocaleString('en-IN');
+  const domainAnalysis = analysis.domain_analysis || {};
+  const networkActivity = analysis.network_activity || {};
+  const manipulation = analysis.manipulation || {};
+  const privacy = analysis.privacy || {};
+  const networkDomainCount = getNetworkDomainCount(analysis);
+  const privacyScore = getDisplayPrivacyScore(analysis);
+  const manipulationScore = Number(manipulation.riskScore || 0);
+  const overallScore = Math.max(privacyScore, manipulationScore);
+  const overallLevel = getRiskLevelFromScore(overallScore);
+  const tone = getHeroTone(overallScore);
+  const ringRadius = 86;
+  const ringCircumference = 2 * Math.PI * ringRadius;
+  const ringOffset = ringCircumference - (Math.max(0, Math.min(10, overallScore)) / 10) * ringCircumference;
+  const patternCount = (manipulation.patterns || []).length;
+  const resolvedTrackers = (domainAnalysis.resolved_trackers || []).length > 0
+    ? (domainAnalysis.resolved_trackers || [])
+    : (privacy.trackers || []).map((item) => ({
+        domain: item.domain,
+        entity: item.name,
+        categories: [item.type],
+        privacy_score: privacy.riskScore || 2,
+      }));
+  const topEntities = [...resolvedTrackers]
+    .sort((a, b) => Number(b.privacy_score || 0) - Number(a.privacy_score || 0))
+    .slice(0, 8);
+  const suspiciousDomains = domainAnalysis.suspicious_domains || [];
+  const rawDomains = networkActivity.raw_domains || [];
+  const identifiedDomainSet = new Set([
+    ...resolvedTrackers.map((item) => normalizeDomain(item.domain || item.matched_domain || '')),
+    ...suspiciousDomains.map((item) => normalizeDomain(item.domain || '')),
+  ].filter(Boolean));
+  const otherBackgroundRequests = rawDomains.filter((domain) => !identifiedDomainSet.has(normalizeDomain(domain)));
+  const entityRows = topEntities.map((item) => {
+    const trackerType = inferTrackerType(item);
+    const trackerIcon = TRACKER_ICONS[trackerType] || TRACKER_ICONS.tracker;
+    const displayName = item.entity || item.displayName || 'Unknown Entity';
+    const score = Number(item.privacy_score || 0);
+    return `
+      <div class="entity-row">
+        <div class="entity-left">
+          <span class="company-badge">${escHtml(companyInitials(displayName))}</span>
+          <span class="entity-icon">${trackerIcon}</span>
+          <div class="entity-meta">
+            <div class="entity-name">${escHtml(displayName)}</div>
+            <div class="domain code">${escHtml(item.domain || '')}</div>
+          </div>
+        </div>
+        <span class="risk-pill ${getRiskBucket(score)}">${score.toFixed(1)}</span>
+      </div>
+    `;
+  }).join('');
+  const suspiciousRows = suspiciousDomains.map((item) => {
+    const tag = getSuspiciousKeywordTag(item.reasons || []);
+    const reasons = (item.reasons || []).map(prettyReason).join(', ');
+    return `
+      <div class="alert-row">
+        <div>
+          <div class="domain code">${escHtml(item.domain || '')}</div>
+          <div class="subtle">${escHtml(reasons || 'Heuristic anomaly')}</div>
+        </div>
+        <span class="alert-tag">${escHtml(tag)}</span>
+      </div>
+    `;
+  }).join('');
+  const patternCards = (manipulation.patterns || []).map((item) => {
+    const severity = String(item.severity || 'low').toLowerCase();
+    const severityKey = severity === 'high' ? 'high' : severity === 'medium' ? 'medium' : 'low';
+    return `
+      <article class="pattern-card severity-${severityKey}">
+        <div class="pattern-head">
+          <strong>${escHtml(item.name || 'Dark Pattern')}</strong>
+          <span class="severity-chip severity-${severityKey}">${escHtml(severityKey)}</span>
+        </div>
+        <p>${escHtml(item.description || 'Manipulative behavior detected.')}</p>
+        <div class="citation">${escHtml(getPatternCitation(item.type))}</div>
+      </article>
+    `;
+  }).join('');
+  const networkLogRows = otherBackgroundRequests
+    .map((domain) => `<div class="log-row code">${escHtml(domain)}</div>`)
+    .join('');
+
+  const privacyLegal = buildPrivacyLegalItems(privacy, networkDomainCount);
+  const manipulationLegal = buildManipulationLegalItems(manipulation);
+  const legalRows = [...privacyLegal, ...manipulationLegal]
+    .map((item) => `
+      <div class="legal-row">
+        <div class="legal-law">⚖️ ${escHtml(item.law)}</div>
+        <div class="subtle">${escHtml(item.section)} — ${escHtml(item.issue)}</div>
+      </div>
+    `)
+    .join('');
+
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-  <title>ConsumerShield Report — ${a.domain}</title>
+  <title>ConsumerShield Report — ${escHtml(analysis.domain)}</title>
   <style>
-    body { font-family: 'Segoe UI', sans-serif; max-width: 800px; margin: 40px auto; color: #1a1a2e; }
-    h1 { color: #6d28d9; } h2 { border-bottom: 2px solid #e5e7eb; padding-bottom: 6px; }
-    .score { font-size: 3rem; font-weight: 900; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }
-    .card { background: #f9fafb; border-radius: 12px; padding: 20px; border: 1px solid #e5e7eb; }
-    ul { padding-left: 20px; } li { margin: 6px 0; }
-    .warning { background: #fef3c7; border-left: 4px solid #f59e0b; padding: 10px 16px; border-radius: 0 8px 8px 0; }
-    footer { font-size: 12px; color: #9ca3af; margin-top: 40px; border-top: 1px solid #e5e7eb; padding-top: 16px; }
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #0f172a;
+      --panel: rgba(15, 23, 42, 0.74);
+      --border: rgba(148, 163, 184, 0.3);
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --red: #ef4444;
+    }
+    body {
+      margin: 0;
+      font-family: 'Inter', 'Roboto', 'Segoe UI', sans-serif;
+      background:
+        radial-gradient(120% 80% at 15% 10%, rgba(56, 189, 248, 0.16), transparent 52%),
+        radial-gradient(95% 70% at 85% 90%, rgba(239, 68, 68, 0.12), transparent 58%),
+        linear-gradient(170deg, var(--bg), #0b1224 72%);
+      color: var(--text);
+      padding: 28px;
+    }
+    .shell {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 14px;
+      padding: 16px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 12px 30px rgba(2, 6, 23, 0.52);
+    }
+    .tone-green { border-color: rgba(74, 222, 128, 0.55); box-shadow: 0 0 0 1px rgba(34,197,94,0.2), 0 0 24px rgba(34,197,94,0.25); }
+    .tone-yellow { border-color: rgba(250, 204, 21, 0.6); box-shadow: 0 0 0 1px rgba(234,179,8,0.22), 0 0 24px rgba(234,179,8,0.26); }
+    .tone-red { border-color: rgba(248, 113, 113, 0.66); box-shadow: 0 0 0 1px rgba(239,68,68,0.24), 0 0 24px rgba(239,68,68,0.3); }
+    .hero-stat {
+      text-align: center;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.55);
+      padding: 16px 12px;
+    }
+    .hero-stat-value { font-size: 32px; font-weight: 800; line-height: 1; }
+    .hero-stat-label { font-size: 11px; color: var(--muted); margin-top: 6px; text-transform: uppercase; letter-spacing: 0.6px; }
+    .ring-wrap { position: relative; width: 220px; height: 220px; display: grid; place-items: center; }
+    .ring svg { width: 220px; height: 220px; }
+    .ring-track { fill: none; stroke: rgba(148,163,184,0.22); stroke-width: 14; }
+    .ring-progress { fill: none; stroke-width: 14; stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+    .ring-progress.tone-green { stroke: var(--green); filter: drop-shadow(0 0 10px rgba(34,197,94,0.65)); }
+    .ring-progress.tone-yellow { stroke: var(--yellow); filter: drop-shadow(0 0 10px rgba(234,179,8,0.65)); }
+    .ring-progress.tone-red { stroke: var(--red); filter: drop-shadow(0 0 11px rgba(239,68,68,0.72)); }
+    .ring-core {
+      position: absolute;
+      width: 138px;
+      height: 138px;
+      border-radius: 50%;
+      background: rgba(2, 6, 23, 0.78);
+      border: 1px solid rgba(148,163,184,0.32);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .ring-score { font-size: 44px; font-weight: 800; line-height: 1; }
+    .ring-level {
+      margin-top: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      border-radius: 999px;
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .headline {
+      margin: 14px 2px 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    .section-grid {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .card {
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 10px 26px rgba(2, 6, 23, 0.46);
+      padding: 14px;
+    }
+    .card h3 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid rgba(148,163,184,0.35);
+      color: var(--muted);
+      background: rgba(30,41,59,0.58);
+    }
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .progress {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(148,163,184,0.22);
+      border: 1px solid rgba(148,163,184,0.28);
+      margin-bottom: 10px;
+    }
+    .bar {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #16a34a, #eab308, #ef4444);
+    }
+    .list { display: flex; flex-direction: column; gap: 8px; }
+    .entity-row, .alert-row, .legal-row {
+      border-radius: 12px;
+      border: 1px solid rgba(148,163,184,0.25);
+      background: rgba(15, 23, 42, 0.56);
+      padding: 9px 10px;
+    }
+    .entity-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .entity-left {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+    }
+    .company-badge {
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 800;
+      color: #bae6fd;
+      background: rgba(14,116,144,0.3);
+      border: 1px solid rgba(56,189,248,0.5);
+    }
+    .entity-icon {
+      width: 22px;
+      height: 22px;
+      border-radius: 7px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      background: rgba(30,41,59,0.76);
+      border: 1px solid rgba(148,163,184,0.28);
+    }
+    .entity-meta { min-width: 0; }
+    .entity-name { font-size: 13px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .domain.code, .log-row.code {
+      font-family: 'Source Code Pro', 'Fira Code', monospace;
+      font-size: 11px;
+      color: #cbd5e1;
+      word-break: break-all;
+    }
+    .subtle { margin-top: 3px; font-size: 11px; color: var(--muted); line-height: 1.4; }
+    .risk-pill {
+      min-width: 36px;
+      text-align: center;
+      font-size: 10px;
+      font-weight: 800;
+      border-radius: 999px;
+      padding: 3px 7px;
+      border: 1px solid rgba(148,163,184,0.35);
+    }
+    .risk-pill.low { color: #bbf7d0; background: rgba(20,83,45,0.62); border-color: rgba(74,222,128,0.55); }
+    .risk-pill.medium { color: #fde68a; background: rgba(113,63,18,0.68); border-color: rgba(250,204,21,0.55); }
+    .risk-pill.high { color: #fecaca; background: rgba(127,29,29,0.7); border-color: rgba(248,113,113,0.6); }
+    .alert-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-left: 3px solid rgba(239,68,68,0.78);
+    }
+    .alert-tag {
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #fecaca;
+      background: rgba(127,29,29,0.8);
+      border: 1px solid rgba(248,113,113,0.64);
+      white-space: nowrap;
+    }
+    .pattern-grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .pattern-card {
+      border-radius: 12px;
+      border: 1px solid rgba(148,163,184,0.28);
+      background: rgba(15,23,42,0.56);
+      padding: 10px;
+    }
+    .pattern-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+    .severity-chip {
+      font-size: 10px;
+      font-weight: 800;
+      border-radius: 999px;
+      padding: 3px 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.45px;
+    }
+    .severity-chip.severity-high { color: #fecaca; background: rgba(127,29,29,0.78); border: 1px solid rgba(248,113,113,0.65); }
+    .severity-chip.severity-medium { color: #fde68a; background: rgba(113,63,18,0.78); border: 1px solid rgba(250,204,21,0.58); }
+    .severity-chip.severity-low { color: #bbf7d0; background: rgba(20,83,45,0.76); border: 1px solid rgba(74,222,128,0.58); }
+    .pattern-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .citation {
+      margin-top: 8px;
+      font-size: 11px;
+      color: #fde68a;
+    }
+    .pattern-card.severity-high { border-color: rgba(248,113,113,0.7); box-shadow: 0 0 0 1px rgba(248,113,113,0.24), 0 0 16px rgba(239,68,68,0.28); }
+    .pattern-card.severity-medium { border-color: rgba(251,146,60,0.66); box-shadow: 0 0 0 1px rgba(251,146,60,0.2), 0 0 14px rgba(249,115,22,0.24); }
+    .pattern-card.severity-low { border-color: rgba(74,222,128,0.62); box-shadow: 0 0 0 1px rgba(74,222,128,0.18), 0 0 12px rgba(34,197,94,0.22); }
+    details.log-card {
+      margin-top: 12px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      overflow: hidden;
+      backdrop-filter: blur(10px);
+    }
+    details.log-card summary {
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      font-weight: 700;
+      font-size: 12px;
+    }
+    details.log-card summary::-webkit-details-marker { display: none; }
+    .log-list { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 7px; }
+    .log-row { border-radius: 10px; border: 1px solid rgba(148,163,184,0.23); background: rgba(15,23,42,0.55); padding: 7px 9px; }
+    .legal-grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .legal-row {
+      border-radius: 12px;
+      border: 1px solid rgba(167,139,250,0.35);
+      background: rgba(76,29,149,0.14);
+      padding: 10px;
+    }
+    .legal-law {
+      font-size: 12px;
+      font-weight: 700;
+      color: #ddd6fe;
+    }
+    .empty {
+      border-radius: 12px;
+      border: 1px dashed rgba(148,163,184,0.36);
+      color: var(--muted);
+      text-align: center;
+      padding: 14px;
+      font-style: italic;
+      background: rgba(15,23,42,0.5);
+    }
+    .footer {
+      margin-top: 16px;
+      color: #94a3b8;
+      font-size: 12px;
+      text-align: center;
+      padding-top: 12px;
+      border-top: 1px solid rgba(148,163,184,0.22);
+    }
+    @media (max-width: 920px) {
+      .hero { grid-template-columns: 1fr; }
+      .ring-wrap { margin: 0 auto; }
+      .section-grid, .pattern-grid, .legal-grid { grid-template-columns: 1fr; }
+    }
   </style></head><body>
-  <h1>🛡️ ConsumerShield Protection Report</h1>
-  <p><b>Website:</b> ${escHtml(a.domain)} &nbsp; | &nbsp; <b>Analyzed:</b> ${date}</p>
-  <div class="grid">
-    <div class="card"><h3>🔒 Privacy Risk</h3><div class="score">${a.privacy.riskScore}/10</div><p>${a.privacy.riskLevel}</p></div>
-    <div class="card"><h3>💸 Manipulation Risk</h3><div class="score">${a.manipulation.riskScore}/10</div><p>${a.manipulation.riskLevel}</p></div>
+  <div class="shell">
+    <section class="hero tone-${tone}">
+      <div class="hero-stat">
+        <div class="hero-stat-value">${networkDomainCount}</div>
+        <div class="hero-stat-label">Domains</div>
+      </div>
+      <div class="ring-wrap">
+        <div class="ring">
+          <svg viewBox="0 0 220 220" aria-label="Overall security risk gauge">
+            <circle class="ring-track" cx="110" cy="110" r="86"></circle>
+            <circle class="ring-progress tone-${tone}" cx="110" cy="110" r="86" style="stroke-dasharray:${ringCircumference};stroke-dashoffset:${ringOffset};"></circle>
+          </svg>
+        </div>
+        <div class="ring-core">
+          <div class="ring-score">${overallScore.toFixed(1)}</div>
+          <div class="ring-level">${escHtml(overallLevel)}</div>
+        </div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-value">${patternCount}</div>
+        <div class="hero-stat-label">Dark Patterns</div>
+      </div>
+    </section>
+
+    <p class="headline"><strong>${escHtml(analysis.domain)}</strong> • Generated ${date}<br>${escHtml(analysis.overall?.insight || 'Security dashboard generated from live network and behavioral signals.')}</p>
+
+    <section class="section-grid">
+      <article class="card">
+        <div class="card-head">
+          <h3>Privacy Card</h3>
+          <span class="chip">${privacyScore.toFixed(1)}/10</span>
+        </div>
+        <div class="progress"><div class="bar" style="width:${Math.max(0, Math.min(100, privacyScore * 10))}%"></div></div>
+        <div class="list">
+          ${entityRows || '<div class="empty">No identified entities.</div>'}
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h3>Suspicious Activity</h3>
+          <span class="chip">${suspiciousDomains.length} flagged</span>
+        </div>
+        <div class="list">
+          ${suspiciousRows || '<div class="empty">No suspicious domains flagged.</div>'}
+        </div>
+      </article>
+    </section>
+
+    <section class="pattern-grid">
+      ${patternCards || '<div class="empty">No dark patterns detected.</div>'}
+    </section>
+
+    <details class="log-card">
+      <summary>
+        <span>Network Traffic Log</span>
+        <span>${otherBackgroundRequests.length} other requests</span>
+      </summary>
+      <div class="log-list">
+        ${networkLogRows || '<div class="empty">No additional background requests.</div>'}
+      </div>
+    </details>
+
+    <section class="legal-grid">
+      ${legalRows || '<div class="empty">No legal mappings available.</div>'}
+    </section>
+
+    <div class="footer">Generated by ConsumerShield • India&apos;s Complete Consumer Protection Tool</div>
   </div>
-  <div class="warning"><b>Overall Risk: ${a.overall.riskScore}/10 — ${a.overall.riskLevel}</b><br>${a.overall.insight}</div>
-  <h2>📡 Trackers (${(a.privacy.trackers||[]).length})</h2><ul>${trackers || '<li>None detected</li>'}</ul>
-  <h2>⚠️ Dark Patterns (${(a.manipulation.patterns||[]).length})</h2><ul>${patterns || '<li>None detected</li>'}</ul>
-  <h2>⚖️ Laws Implicated</h2>
-  <ul>
-    ${(a.privacy.trackers?.length > 0) ? '<li>Digital Personal Data Protection Act 2023 — Section 6 (Consent), Section 8 (Fiduciary), Section 12 (Rights)</li>' : ''}
-    ${(a.manipulation.patterns?.length > 0) ? '<li>CCPA Dark Patterns Guidelines 2023 — Multiple violations</li>' : ''}
-    ${(a.manipulation.patterns?.length > 0) ? '<li>Consumer Protection Act 2019 — Section 2(47) Unfair Trade Practice</li>' : ''}
-  </ul>
-  <footer>Generated by ConsumerShield • India&apos;s Complete Consumer Protection Tool</footer>
   </body></html>`;
 }
 
-// ── Utilities ─────────────────────────────────────────────────
 function normalizeDomain(url) {
-  try { return new URL(url).hostname.replace(/^www\./, ''); }
-  catch { return url || ''; }
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url || '';
+  }
 }
-function setText(id, val) {
-  const el = document.getElementById(id);
-  if (el) el.textContent = val;
+
+function setText(id, value) {
+  const node = document.getElementById(id);
+  if (node) node.textContent = value;
 }
+
 function escHtml(str) {
-  return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }

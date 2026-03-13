@@ -84,11 +84,25 @@ function normalizeDomain(url) {
   }
 }
 
+function mergeStoredAnalysis(domain, patch) {
+  chrome.storage.local.get([domain], (result) => {
+    const stored = result[domain] || {};
+    chrome.storage.local.set({
+      [domain]: {
+        ...stored,
+        ...patch,
+      },
+    });
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Backend relay (optional — gracefully skips if not available)
 // ═══════════════════════════════════════════════════════════════════════════
 
 const BACKEND_URL = 'http://localhost:8000';
+const tabTraffic = new Map();
+const auditTimers = new Map();
 
 async function sendToBackend(analysis) {
   try {
@@ -106,12 +120,10 @@ async function sendToBackend(analysis) {
       const backendResult = await response.json();
       // Merge AI insight and regulatory violations from backend
       const domain = normalizeDomain(analysis.url);
-      chrome.storage.local.get([domain], (result) => {
-        const stored = result[domain] || {};
-        stored.aiInsight = backendResult.combined_insight;
-        stored.regulatoryViolations = backendResult.regulatory_violations;
-        stored.backendAnalyzed = true;
-        chrome.storage.local.set({ [domain]: stored });
+      mergeStoredAnalysis(domain, {
+        aiInsight: backendResult.combined_insight,
+        regulatoryViolations: backendResult.regulatory_violations,
+        backendAnalyzed: true,
       });
     }
   } catch {
@@ -138,6 +150,96 @@ async function fetchDomainIntelligence(detectedDomains, currentTabDomain) {
   }
 }
 
+function getOrCreateTrafficState(tabId, firstPartyDomain = '') {
+  let state = tabTraffic.get(tabId);
+  if (!state) {
+    state = {
+      firstPartyDomain,
+      allDetectedDomains: new Set(),
+      totalRequestCount: 0,
+    };
+    tabTraffic.set(tabId, state);
+  } else if (firstPartyDomain) {
+    state.firstPartyDomain = firstPartyDomain;
+  }
+  return state;
+}
+
+function persistTrafficSnapshot(firstPartyDomain, state) {
+  if (!firstPartyDomain || !state) return;
+  mergeStoredAnalysis(firstPartyDomain, {
+    domain: firstPartyDomain,
+    network_activity: {
+      live_monitor: true,
+      total_request_count: state.totalRequestCount,
+      unique_domain_count: state.allDetectedDomains.size,
+      raw_domains: Array.from(state.allDetectedDomains).sort(),
+      updated_at: Date.now(),
+    },
+  });
+}
+
+async function auditTrafficState(tabId) {
+  const state = tabTraffic.get(tabId);
+  if (!state?.firstPartyDomain) return;
+
+  const domains = Array.from(state.allDetectedDomains);
+  const domainIntelligence = await fetchDomainIntelligence(domains, state.firstPartyDomain);
+  if (!domainIntelligence) return;
+
+  mergeStoredAnalysis(state.firstPartyDomain, {
+    domain_analysis: domainIntelligence,
+  });
+}
+
+function scheduleTrafficAudit(tabId) {
+  if (auditTimers.has(tabId)) {
+    clearTimeout(auditTimers.get(tabId));
+  }
+
+  const timer = setTimeout(() => {
+    auditTimers.delete(tabId);
+    auditTrafficState(tabId).catch(() => {});
+  }, 1200);
+
+  auditTimers.set(tabId, timer);
+}
+
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (details.tabId < 0) return;
+
+    const requestDomain = normalizeDomain(details.url);
+    if (!requestDomain) return;
+
+    if (details.type === 'main_frame') {
+      const state = getOrCreateTrafficState(details.tabId, requestDomain);
+      state.firstPartyDomain = requestDomain;
+      state.allDetectedDomains.clear();
+      state.totalRequestCount = 0;
+      persistTrafficSnapshot(requestDomain, state);
+      return;
+    }
+
+    const initiatorDomain = normalizeDomain(details.initiator || details.documentUrl || '');
+    const state = getOrCreateTrafficState(details.tabId, initiatorDomain);
+    const currentTabDomain = state.firstPartyDomain || initiatorDomain;
+
+    if (!currentTabDomain || requestDomain === currentTabDomain) return;
+
+    state.totalRequestCount += 1;
+    const beforeSize = state.allDetectedDomains.size;
+    state.allDetectedDomains.add(requestDomain);
+
+    persistTrafficSnapshot(currentTabDomain, state);
+
+    if (state.allDetectedDomains.size !== beforeSize) {
+      scheduleTrafficAudit(details.tabId);
+    }
+  },
+  { urls: ['<all_urls>'] }
+);
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Message handler
 // ═══════════════════════════════════════════════════════════════════════════
@@ -146,12 +248,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'analyzeComplete') {
     const data = request.data;
     const domain = normalizeDomain(data.url);
-    const detectedDomains = [...new Set(
+    const fallbackDetectedDomains = [...new Set(
       (data.privacy?.trackers || [])
         .map(t => normalizeDomain(t.domain))
         .filter(Boolean)
     )];
-    const currentTabDomain = domain;
+    const tabId = sender.tab?.id;
+    const trafficState = typeof tabId === 'number' ? tabTraffic.get(tabId) : null;
+    const detectedDomains = trafficState?.allDetectedDomains?.size
+      ? Array.from(trafficState.allDetectedDomains)
+      : fallbackDetectedDomains;
+    const currentTabDomain = trafficState?.firstPartyDomain || domain;
 
     const privacyRisk = calculatePrivacyRisk(data.privacy);
     const manipulationRisk = calculateManipulationRisk(data.manipulation);
@@ -166,7 +273,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       domain,
       url: data.url,
       timestamp: data.timestamp,
-      domain_analysis: null,
       privacy: {
         ...data.privacy,
         riskScore: privacyRisk,
@@ -189,23 +295,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     analysis.overall.insight = generateInsight(analysis);
 
-    // Persist to storage
-    chrome.storage.local.set({ [domain]: analysis });
+    if (trafficState) {
+      persistTrafficSnapshot(currentTabDomain, trafficState);
+    }
 
-    // Fetch tracker/entity intelligence for known + unknown domains
-    fetchDomainIntelligence(detectedDomains, currentTabDomain)
-      .then((domainIntelligence) => {
-        if (!domainIntelligence) return;
-        chrome.storage.local.get([domain], (result) => {
-          const stored = result[domain] || analysis;
-          stored.domain_analysis = domainIntelligence;
-          chrome.storage.local.set({ [domain]: stored });
-        });
-      })
-      .catch(() => {});
+    // Persist to storage without losing live traffic/domain audit data
+    mergeStoredAnalysis(domain, analysis);
+
+    // Deep-dive audit should use the full observed domain list
+    if (typeof tabId === 'number' && trafficState) {
+      scheduleTrafficAudit(tabId);
+    } else {
+      fetchDomainIntelligence(detectedDomains, currentTabDomain)
+        .then((domainIntelligence) => {
+          if (!domainIntelligence) return;
+          mergeStoredAnalysis(domain, { domain_analysis: domainIntelligence });
+        })
+        .catch(() => {});
+    }
 
     // Update badge on the tab
-    const tabId = sender.tab?.id;
     if (tabId) {
       const badgeText = overallRisk > 0 ? overallRisk.toFixed(1) : '';
       chrome.action.setBadgeText({ text: badgeText, tabId });
@@ -233,5 +342,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') {
     chrome.action.setBadgeText({ text: '', tabId }).catch(() => {});
+
+    if (auditTimers.has(tabId)) {
+      clearTimeout(auditTimers.get(tabId));
+      auditTimers.delete(tabId);
+    }
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabTraffic.delete(tabId);
+  if (auditTimers.has(tabId)) {
+    clearTimeout(auditTimers.get(tabId));
+    auditTimers.delete(tabId);
   }
 });

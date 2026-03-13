@@ -39,49 +39,75 @@
   <!-- ╔══ OVERVIEW TAB ════════════════════════════════════════╗ -->
   <div class="tab-content active" id="tab-content-overview">
 
-    <!-- Dual score cards -->
-    <div class="score-grid">
-      <div class="score-card privacy" id="card-privacy">
-        <div class="score-icon">🔒</div>
-        <div class="score-label">Privacy Risk</div>
-        <div class="score-value" id="score-privacy">–</div>
-        <div class="score-level" id="level-privacy">Scanning</div>
+    <div class="dashboard-hero report-card" id="dashboard-hero">
+      <div class="hero-substat">
+        <span class="hero-substat-value" id="hero-domain-count">0</span>
+        <span class="hero-substat-label">Domains</span>
       </div>
-      <div class="score-card manipulation" id="card-manipulation">
-        <div class="score-icon">💸</div>
-        <div class="score-label">Manipulation Risk</div>
-        <div class="score-value" id="score-manipulation">–</div>
-        <div class="score-level" id="level-manipulation">Scanning</div>
+
+      <div class="hero-gauge-wrap">
+        <svg class="hero-gauge" viewBox="0 0 180 180" role="img" aria-label="Overall security risk gauge">
+          <circle class="hero-gauge-track" cx="90" cy="90" r="64"></circle>
+          <circle class="hero-gauge-progress" id="hero-gauge-progress" cx="90" cy="90" r="64"></circle>
+        </svg>
+        <div class="hero-gauge-core">
+          <div class="hero-risk-score" id="hero-risk-score">0.0</div>
+          <div class="hero-risk-level" id="hero-risk-level">SAFE</div>
+        </div>
+      </div>
+
+      <div class="hero-substat">
+        <span class="hero-substat-value" id="hero-pattern-count">0</span>
+        <span class="hero-substat-label">Dark Patterns</span>
       </div>
     </div>
 
-    <!-- Overall risk gauge -->
-    <div class="overall-card" id="overall-card">
-      <div class="overall-header">
-        <span class="overall-label">Overall Risk</span>
-        <span class="overall-value" id="overall-value">–</span>
-        <span class="overall-level" id="overall-level">–</span>
-      </div>
-      <div class="progress-bar-track">
-        <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
-      </div>
-      <p class="overall-insight" id="overall-insight">Analyzing this page…</p>
-    </div>
+    <p class="overall-insight" id="overall-insight">Analyzing this page…</p>
 
-    <!-- Quick Stats -->
-    <div class="stats-row">
-      <div class="stat-box">
-        <span class="stat-num" id="stat-trackers">–</span>
-        <span class="stat-lbl">Trackers</span>
-      </div>
-      <div class="stat-box">
-        <span class="stat-num" id="stat-patterns">–</span>
-        <span class="stat-lbl">Dark Patterns</span>
-      </div>
-      <div class="stat-box">
-        <span class="stat-num" id="stat-violations">–</span>
-        <span class="stat-lbl">Total Violations</span>
-      </div>
+    <div class="dashboard-stack">
+      <section class="dashboard-card privacy-card report-card" id="dashboard-privacy-card">
+        <div class="dashboard-card-head">
+          <h3>Privacy Card</h3>
+          <span class="score-chip" id="privacy-card-score">0.0/10</span>
+        </div>
+        <div class="privacy-progress-track">
+          <div class="privacy-progress-fill" id="privacy-card-fill" style="width:0%"></div>
+        </div>
+        <div class="dashboard-subtitle">Top Identified Entities</div>
+        <div class="dashboard-list" id="identified-entities-list">
+          <div class="empty-state">Scanning identified entities…</div>
+        </div>
+      </section>
+
+      <section class="dashboard-card suspicious-card report-card" id="dashboard-suspicious-card">
+        <div class="dashboard-card-head">
+          <h3>Suspicious Activity</h3>
+          <span class="score-chip score-chip-danger" id="suspicious-count-chip">0 flagged</span>
+        </div>
+        <div class="dashboard-list" id="suspicious-activity-list">
+          <div class="empty-state">No suspicious domains flagged yet.</div>
+        </div>
+      </section>
+
+      <section class="dashboard-card manipulation-tier-card report-card" id="dashboard-manipulation-card">
+        <div class="dashboard-card-head">
+          <h3>Manipulation Card</h3>
+          <span class="score-chip score-chip-warn" id="manipulation-card-score">0.0/10</span>
+        </div>
+        <div class="dashboard-list" id="manipulation-severity-list">
+          <div class="empty-state">Scanning dark patterns…</div>
+        </div>
+      </section>
+
+      <details class="dashboard-card network-log report-card" id="network-log-accordion">
+        <summary>
+          <span>Network Traffic Log</span>
+          <span class="accordion-count" id="network-log-count">0 requests</span>
+        </summary>
+        <div class="network-log-list" id="network-log-list">
+          <div class="empty-state">No additional background requests.</div>
+        </div>
+      </details>
     </div>
 
     <!-- Laws cited -->
