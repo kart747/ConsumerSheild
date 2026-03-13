@@ -449,39 +449,58 @@
 
   function detectDarkPatterns() {
     const bodyText = document.body?.innerText || '';
+    const normalizedBodyText = normalizeScanText(bodyText).slice(0, 140000);
     const candidates = collectDarkPatternCandidates(bodyText);
+
+    const upsertPattern = (type, config, sampleText, element, confidence) => {
+      const existing = state.patterns.find((p) => p.type === type);
+      if (!existing) {
+        state.patterns.push({
+          type,
+          name: config.name,
+          severity: config.severity,
+          confidence,
+          law: config.law,
+          penalty: config.penalty,
+          description: config.description,
+          element,
+          text: sampleText,
+        });
+      } else if ((existing.confidence || 0) < confidence) {
+        existing.confidence = confidence;
+        existing.text = sampleText;
+        existing.element = element || existing.element;
+      }
+
+      if (element) {
+        applyOverlay(element, 'manipulation', config.name);
+      }
+    };
 
     Object.entries(DARK_PATTERNS).forEach(([type, config]) => {
       // Text pattern matching
       config.patterns.forEach((regex) => {
         const matchedCandidate = candidates.find((candidate) => regex.test(candidate.text));
-        if (!matchedCandidate) return;
-
-        const existing = state.patterns.find((p) => p.type === type);
-        const sampleText = getPatternSample(matchedCandidate.text, regex) || matchedCandidate.text.slice(0, 100).trim();
-        const confidence = Math.min(0.97, (matchedCandidate.contextScore || 0.7) + (matchedCandidate.element ? 0.08 : 0));
-
-        if (!existing) {
-          state.patterns.push({
-            type,
-            name: config.name,
-            severity: config.severity,
-            confidence,
-            law: config.law,
-            penalty: config.penalty,
-            description: config.description,
-            element: matchedCandidate.element,
-            text: sampleText,
-          });
-        } else if ((existing.confidence || 0) < confidence) {
-          existing.confidence = confidence;
-          existing.text = sampleText;
-          existing.element = matchedCandidate.element || existing.element;
+        if (matchedCandidate) {
+          const sampleText = getPatternSample(matchedCandidate.text, regex) || matchedCandidate.text.slice(0, 100).trim();
+          const confidence = Math.min(0.97, (matchedCandidate.contextScore || 0.7) + (matchedCandidate.element ? 0.08 : 0));
+          upsertPattern(type, config, sampleText, matchedCandidate.element, confidence);
+          return;
         }
 
-        if (matchedCandidate.element) {
-          applyOverlay(matchedCandidate.element, 'manipulation', config.name);
-        }
+        // Old branch behavior fallback: broad body-text scan catches patterns missed by focused candidates.
+        if (!normalizedBodyText) return;
+        const bodyMatch = normalizedBodyText.match(regex);
+        if (!bodyMatch) return;
+
+        const anchorElement = findElementContaining(regex) || document.body;
+        const sampleText = (bodyMatch[0] || getPatternSample(normalizedBodyText, regex) || normalizedBodyText.slice(0, 120)).slice(0, 120);
+        const fallbackConfidence = Math.min(
+          0.84,
+          (config.severity === 'high' ? 0.72 : 0.66) + (anchorElement && anchorElement !== document.body ? 0.05 : 0),
+        );
+
+        upsertPattern(type, config, sampleText, anchorElement, fallbackConfidence);
       });
     });
 
@@ -1218,6 +1237,7 @@
       'button',
       'a',
       'label',
+      'span',
       'h1',
       'h2',
       'h3',
@@ -1263,9 +1283,9 @@
     const bodySentences = normalizeScanText(bodyText || '')
       .split(/(?<=[.!?])\s+/)
       .map((entry) => entry.trim())
-      .filter((entry) => entry.length >= 20 && entry.length <= 180 && highSignalSentenceRegex.test(entry));
+      .filter((entry) => entry.length >= 20 && entry.length <= 260 && highSignalSentenceRegex.test(entry));
 
-    bodySentences.slice(0, 10).forEach((entry) => {
+    bodySentences.slice(0, 24).forEach((entry) => {
       const dedupeKey = entry.toLowerCase();
       if (seen.has(dedupeKey)) return;
       seen.add(dedupeKey);
