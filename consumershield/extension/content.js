@@ -447,12 +447,12 @@
   // 3. DARK PATTERN DETECTION
   // ═══════════════════════════════════════════════════════════════════════════
 
-  function detectDarkPatterns() {
+  async function detectDarkPatterns() {
     const bodyText = document.body?.innerText || '';
     const normalizedBodyText = normalizeScanText(bodyText).slice(0, 140000);
     const candidates = collectDarkPatternCandidates(bodyText);
 
-    const upsertPattern = (type, config, sampleText, element, confidence) => {
+    const upsertPattern = (type, config, sampleText, element, confidence, descriptionOverride = null) => {
       const existing = state.patterns.find((p) => p.type === type);
       if (!existing) {
         state.patterns.push({
@@ -462,13 +462,14 @@
           confidence,
           law: config.law,
           penalty: config.penalty,
-          description: config.description,
+          description: descriptionOverride || config.description,
           element,
           text: sampleText,
         });
       } else if ((existing.confidence || 0) < confidence) {
         existing.confidence = confidence;
         existing.text = sampleText;
+        existing.description = descriptionOverride || existing.description;
         existing.element = element || existing.element;
       }
 
@@ -515,6 +516,57 @@
     detectEcommercePricingManipulation();
     detectTrickWordingAdvanced();
     detectVisualInterference();
+
+    await enrichTaxonomyPatternMentions(bodyText, upsertPattern);
+  }
+
+  async function enrichTaxonomyPatternMentions(bodyText, upsertPattern) {
+    const currentText = normalizeScanText(bodyText || '');
+    if (!currentText) return;
+
+    // Educational catalog pages (e.g., deceptive pattern directories) are expected to mention many pattern families.
+    const hasTaxonomyCue = /\b(deceptive\s*patterns?|dark\s*patterns?)\b/i.test(currentText)
+      && /\b(types?|taxonomy|hall\s*of\s*shame|view\s*types)\b/i.test(currentText);
+    if (!hasTaxonomyCue) return;
+
+    const typesAnchor = document.querySelector('a[href*="/types"], a[href*="types"]');
+    let catalogText = currentText;
+
+    if (typesAnchor) {
+      try {
+        const typesUrl = new URL(typesAnchor.getAttribute('href') || '', window.location.href).toString();
+        const response = await fetch(typesUrl, { credentials: 'same-origin' });
+        if (response.ok) {
+          const html = await response.text();
+          const stripped = html
+            .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ');
+          catalogText = `${catalogText} ${normalizeScanText(stripped)}`.slice(0, 220000);
+        }
+      } catch {
+        // Ignore network failures and continue with on-page text only.
+      }
+    }
+
+    Object.entries(DARK_PATTERNS).forEach(([type, config]) => {
+      if (state.patterns.some((p) => p.type === type)) return;
+
+      const matchedRegex = config.patterns.find((regex) => regex.test(catalogText));
+      if (!matchedRegex) return;
+
+      const sampleText = (getPatternSample(catalogText, matchedRegex) || config.name).slice(0, 120);
+      const confidence = config.severity === 'high' ? 0.69 : 0.64;
+
+      upsertPattern(
+        type,
+        config,
+        sampleText,
+        document.body,
+        confidence,
+        'Pattern family appears in deceptive-pattern taxonomy/reference content.',
+      );
+    });
   }
 
   function detectPreselectedOptions() {
@@ -1377,7 +1429,7 @@
       injectOverlayStyles();
       detectTrackers();
       analyzePrivacyPolicy();
-      detectDarkPatterns();
+      await detectDarkPatterns();
 
       // Send results to background worker
       if (chrome && chrome.runtime && chrome.runtime.sendMessage) {
