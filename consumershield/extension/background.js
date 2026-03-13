@@ -131,12 +131,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const privacyRisk = calculatePrivacyRisk(data.privacy);
     const manipulationRisk = calculateManipulationRisk(data.manipulation);
     
-    // NEW FORMULA: Weighted calculation where higher risk dominates (60%) + lower risk (40%)
-    // This prevents medium-risk assessments when one dimension is critical (e.g., 10/10 manipulation)
-    const overallRisk = parseFloat(
-      (Math.max(privacyRisk, manipulationRisk) * 0.6 + 
-       Math.min(privacyRisk, manipulationRisk) * 0.4).toFixed(1)
-    );
+    // FORMULA: Use MAX of both risks
+    // If either dimension is CRITICAL, overall is CRITICAL
+    // If either dimension is HIGH, overall is HIGH
+    const overallRisk = Math.max(privacyRisk, manipulationRisk);
     const overallLevel = getRiskLevel(overallRisk);
 
     const analysis = {

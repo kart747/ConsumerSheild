@@ -160,18 +160,21 @@ function setBadge(id, score, level) {
 function renderPrivacyTab(a) {
   const p = a.privacy;
 
-  // Trackers
+  // Trackers — Always display detected trackers regardless of privacy score
   const trackerList = document.getElementById('tracker-list');
   if (trackerList) {
-    if ((p.trackers?.length ?? 0) === 0) {
+    const trackers = p.trackers ?? [];
+    if (trackers.length === 0) {
       trackerList.innerHTML = '<div class="safe-state">✅ No known trackers detected</div>';
     } else {
-      trackerList.innerHTML = p.trackers.map(t => `
+      // Always show tracker names and details, even if privacy score is low
+      trackerList.innerHTML = trackers.map(t => `
         <div class="tracker-item">
           <div class="item-icon">${TRACKER_ICONS[t.type] || '🔍'}</div>
           <div class="item-body">
             <div class="item-name">${escHtml(t.name)}</div>
             <div class="item-sub">${escHtml(t.domain)}</div>
+            ${t.source ? `<div class="item-source">Detected via: ${escHtml(t.source)}</div>` : ''}
           </div>
           <div class="item-badge badge-${t.type}">${escHtml(t.type)}</div>
         </div>
