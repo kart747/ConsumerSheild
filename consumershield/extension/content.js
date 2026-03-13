@@ -10,40 +10,10 @@
   'use strict';
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // TRACKER DATABASE
+  // TRACKER EXTRACTOR (Dynamic collection for Backend Radar Lite)
   // ═══════════════════════════════════════════════════════════════════════════
-
-  const KNOWN_TRACKERS = [
-    // Analytics
-    { domain: 'google-analytics.com',  type: 'analytics',    name: 'Google Analytics' },
-    { domain: 'googletagmanager.com',  type: 'analytics',    name: 'Google Tag Manager' },
-    { domain: 'analytics.google.com',  type: 'analytics',    name: 'Google Analytics 4' },
-    { domain: 'hotjar.com',            type: 'analytics',    name: 'Hotjar' },
-    { domain: 'mixpanel.com',          type: 'analytics',    name: 'Mixpanel' },
-    { domain: 'amplitude.com',         type: 'analytics',    name: 'Amplitude' },
-    { domain: 'segment.com',           type: 'analytics',    name: 'Segment' },
-    { domain: 'heap.io',               type: 'analytics',    name: 'Heap Analytics' },
-    // Advertising
-    { domain: 'doubleclick.net',       type: 'advertising',  name: 'DoubleClick (Google)' },
-    { domain: 'googlesyndication.com', type: 'advertising',  name: 'Google AdSense' },
-    { domain: 'googleadservices.com',  type: 'advertising',  name: 'Google Ad Services' },
-    { domain: 'criteo.com',            type: 'advertising',  name: 'Criteo' },
-    { domain: 'taboola.com',           type: 'advertising',  name: 'Taboola' },
-    { domain: 'outbrain.com',          type: 'advertising',  name: 'Outbrain' },
-    { domain: 'moat.com',              type: 'advertising',  name: 'Moat Analytics' },
-    // Social
-    { domain: 'facebook.com',          type: 'social',       name: 'Facebook Pixel' },
-    { domain: 'connect.facebook.net',  type: 'social',       name: 'Facebook SDK' },
-    { domain: 'platform.twitter.com',  type: 'social',       name: 'Twitter Analytics' },
-    { domain: 'linkedin.com',          type: 'social',       name: 'LinkedIn Insight' },
-    { domain: 'snap.com',              type: 'social',       name: 'Snapchat Pixel' },
-    // Data Brokers
-    { domain: 'scorecardresearch.com', type: 'data_broker',  name: 'Comscore/Scorecard' },
-    { domain: 'quantserve.com',        type: 'data_broker',  name: 'Quantcast' },
-    { domain: 'bluekai.com',           type: 'data_broker',  name: 'Oracle BlueKai' },
-    { domain: 'adnxs.com',             type: 'data_broker',  name: 'AppNexus (Xandr)' },
-    { domain: 'rubiconproject.com',    type: 'data_broker',  name: 'Rubicon Project' },
-  ];
+  
+  // The backend now handles the DDG Tracker Radar DB. We just collect third-party domains.
 
   // ═══════════════════════════════════════════════════════════════════════════
   // DARK PATTERN SIGNATURES
@@ -267,7 +237,8 @@
   // ═══════════════════════════════════════════════════════════════════════════
 
   const state = {
-    trackers: [],
+    detectedDomains: [], // Store domains to send to background
+    trackers: [],        // Will be empty in content.js now, fulfilled by background.js
     policy: { thirdPartySharing: false, noOptOut: false, extensiveCollection: false, hasOptOut: false },
     fingerprinting: false,
     patterns: [],
@@ -282,38 +253,43 @@
   // ═══════════════════════════════════════════════════════════════════════════
 
   function detectTrackers() {
-    const found = [];
-    const pageHTML = document.documentElement.innerHTML;
-    const seenNames = new Set();
-
-    const TRACKERS = [
-      { domain: 'google-analytics.com', type: 'analytics', name: 'Google Analytics' },
-      { domain: 'googletagmanager.com', type: 'analytics', name: 'Google Tag Manager' },
-      { domain: 'googlesyndication.com', type: 'advertising', name: 'Google AdSense' },
-      { domain: 'connect.facebook.net', type: 'social', name: 'Facebook Pixel' },
-      { domain: 'doubleclick.net', type: 'advertising', name: 'DoubleClick' },
-      { domain: 'hotjar.com', type: 'analytics', name: 'Hotjar' },
-      { domain: 'newrelic.com', type: 'analytics', name: 'New Relic' },
-      { domain: 'nr-data.net', type: 'analytics', name: 'New Relic' },
-      { domain: 'clevertap.com', type: 'analytics', name: 'CleverTap' },
-      { domain: 'webengage.com', type: 'analytics', name: 'WebEngage' },
-      { domain: 'moengage.com', type: 'analytics', name: 'MoEngage' },
-      { domain: 'criteo.com', type: 'advertising', name: 'Criteo' },
-      { domain: 'taboola.com', type: 'advertising', name: 'Taboola' },
-    ];
-
-    TRACKERS.forEach(tracker => {
-      if (pageHTML.includes(tracker.domain) && !seenNames.has(tracker.name)) {
-        seenNames.add(tracker.name);
-        found.push({ domain: tracker.domain, type: tracker.type, name: tracker.name });
-        state.trackers.push({ domain: tracker.domain, type: tracker.type, name: tracker.name });
+    const mainHost = window.location.hostname;
+    const thirdPartyDomains = new Set();
+    
+    // Check performance resource timings (iframes, scripts, xhr, fetches)
+    if (window.performance && performance.getEntriesByType) {
+      const resources = performance.getEntriesByType('resource');
+      for (const res of resources) {
+        try {
+          const url = new URL(res.name);
+          if (url.hostname && url.hostname !== mainHost && !url.hostname.endsWith('.' + mainHost)) {
+            thirdPartyDomains.add(url.hostname);
+          }
+        } catch(e) {}
       }
+    }
+    
+    // Check script tags explicitly
+    document.querySelectorAll('script[src], iframe[src], link[href]').forEach(el => {
+      try {
+        const urlStr = el.src || el.href;
+        if (urlStr) {
+          const url = new URL(urlStr, window.location.href);
+          if (url.hostname && url.hostname !== mainHost && !url.hostname.endsWith('.' + mainHost)) {
+            thirdPartyDomains.add(url.hostname);
+          }
+        }
+      } catch(e) {}
     });
 
-    // Canvas fingerprinting signal
+    state.detectedDomains = Array.from(thirdPartyDomains);
+    console.log('[ConsumerShield] 3rd party domains extracted:', state.detectedDomains);
+
+    // Canvas fingerprinting signal - optimized check
+    const pageStart = (document.body?.innerText || "").slice(0, 10000); 
     if (
-      pageHTML.includes('getImageData') && pageHTML.includes('canvas') ||
-      pageHTML.includes('HTMLCanvasElement') && pageHTML.includes('toDataURL')
+      pageStart.includes('getImageData') || 
+      pageStart.includes('toDataURL')
     ) {
       state.fingerprinting = true;
     }
@@ -437,13 +413,22 @@
 
   // DOM-based dark pattern detection functions
   function detectCountdownTimers() {
-    const timerElements = Array.from(document.querySelectorAll('*')).filter(el => {
+    // Only look at common container elements for timers to save performance
+    const targetSelectors = 'span, div, b, p, strong, section';
+    const elements = document.querySelectorAll(targetSelectors);
+    
+    const timerElements = [];
+    for (let i = 0; i < Math.min(elements.length, 1000); i++) { // Limit scan to first 100 elements
+      const el = elements[i];
       const text = el.textContent || '';
+      if (text.length > 50) continue; // Skip large text blocks
+      
       const isTimer = text.match(/\d+\s*(?:hours?|mins?|minutes?|seconds?)\s*(?:left|remaining)/i);
       const isVisible = el.offsetHeight > 0 && window.getComputedStyle(el).display !== 'none';
-      const isReasonableSize = el.offsetWidth > 30 && el.offsetHeight > 12;
-      return isTimer && isVisible && isReasonableSize;
-    });
+      if (isTimer && isVisible) {
+        timerElements.push(el);
+      }
+    }
 
     if (timerElements.length > 0) {
       const existing = state.patterns.find(p => p.type === 'urgency' && p.text === 'Countdown Timer');
@@ -922,9 +907,13 @@
 
     try {
       injectOverlayStyles();
-      detectTrackers();
-      analyzePrivacyPolicy();
-      detectDarkPatterns();
+      console.log('[ConsumerShield] Style injected');
+      
+      try { detectTrackers(); } catch(e) { console.error('Tracker detection failed', e); }
+      try { analyzePrivacyPolicy(); } catch(e) { console.error('Policy analysis failed', e); }
+      try { detectDarkPatterns(); } catch(e) { console.error('Dark pattern detection failed', e); }
+
+      console.log('[ConsumerShield] Detection phase complete, sending to background...');
 
       // Send results to background worker
       if (chrome && chrome.runtime && chrome.runtime.sendMessage) {
@@ -935,7 +924,7 @@
             domain: window.location.hostname,
             timestamp: Date.now(),
             privacy: {
-              trackers: state.trackers,
+              detectedDomains: state.detectedDomains,
               policy: state.policy,
               fingerprinting: state.fingerprinting,
             },
@@ -952,13 +941,15 @@
               })),
             },
           }
-        }, () => {
-          // Ignore connection errors (popup may not be open)
-          if (chrome.runtime.lastError) { /* noop */ }
+        }, (response) => {
+          console.log('[ConsumerShield] Background acknowledged:', response);
+          if (chrome.runtime.lastError) { 
+             console.warn('[ConsumerShield] Send error:', chrome.runtime.lastError);
+          }
         });
       }
     } catch (err) {
-      console.warn('[ConsumerShield] Analysis error:', err);
+      console.error('[ConsumerShield] Critical analysis error:', err);
     }
   }
 
@@ -970,19 +961,19 @@
     setTimeout(runAnalysis, 800);
   }
 
-  // Re-run on SPA navigation
+  // Re-run on SPA navigation (More efficient check)
   let lastUrl = location.href;
-  const observer = new MutationObserver(() => {
+  setInterval(() => {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       analysisRun = false;
+      state.detectedDomains = [];
       state.trackers = [];
       state.patterns = [];
       state.policy = { thirdPartySharing: false, noOptOut: false, extensiveCollection: false, hasOptOut: false };
       state.fingerprinting = false;
-      setTimeout(runAnalysis, 1200);
+      setTimeout(runAnalysis, 1500);
     }
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
+  }, 2000);
 
 })();

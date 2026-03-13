@@ -245,6 +245,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 // ═══════════════════════════════════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  console.log('[ConsumerShield] Background received action:', request.action);
   if (request.action === 'analyzeComplete') {
     const data = request.data;
     const domain = normalizeDomain(data.url);
@@ -260,14 +261,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       : fallbackDetectedDomains;
     const currentTabDomain = trafficState?.firstPartyDomain || domain;
 
-    const privacyRisk = calculatePrivacyRisk(data.privacy);
-    const manipulationRisk = calculateManipulationRisk(data.manipulation);
+    // Call backend to resolve detectedDomains into trackers
+    const domainsToAnalyze = data.privacy.detectedDomains || [];
     
-    // FORMULA: Use MAX of both risks
-    // If either dimension is CRITICAL, overall is CRITICAL
-    // If either dimension is HIGH, overall is HIGH
-    const overallRisk = Math.max(privacyRisk, manipulationRisk);
-    const overallLevel = getRiskLevel(overallRisk);
+    // Default trackers if backend is unavailable
+    let resolvedTrackers = [];
+    
+    fetch(`${BACKEND_URL}/analyze-domains`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(domainsToAnalyze),
+      signal: AbortSignal.timeout(2000), // Reduced from 3000
+    })
+    .then(res => res.json())
+    .then(backendData => {
+      resolvedTrackers = backendData.trackers || [];
+      finishAnalysis(resolvedTrackers);
+    })
+    .catch(err => {
+      console.warn('[ConsumerShield] Backend tracker resolution failed or timed out', err);
+      // Fallback to extraction of basic domains if resolution fails
+      const fallbackTrackers = domainsToAnalyze.map(d => ({ domain: d, type: 'unknown', name: d.split('.')[0] }));
+      finishAnalysis(fallbackTrackers);
+    });
+
+    function finishAnalysis(trackers) {
+      // Replace raw domains with resolved trackers
+      data.privacy.trackers = trackers;
+      
+      const privacyRisk = calculatePrivacyRisk(data.privacy);
+      const manipulationRisk = calculateManipulationRisk(data.manipulation);
+      
+      // FORMULA: Use MAX of both risks
+      const overallRisk = Math.max(privacyRisk, manipulationRisk);
+      const overallLevel = getRiskLevel(overallRisk);
 
     const analysis = {
       domain,
@@ -321,10 +348,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       chrome.action.setBadgeBackgroundColor({ color: getBadgeColor(overallLevel), tabId });
     }
 
-    // Optionally enrich with backend AI
-    sendToBackend(analysis).catch(() => {});
+      // Optionally enrich with backend AI
+      sendToBackend(analysis).catch(() => {});
 
-    sendResponse({ success: true, domain });
+      sendResponse({ success: true, domain });
+    }
+    
+    return true; // Keep message channel open for async fetch
   }
 
   if (request.action === 'getAnalysis') {
