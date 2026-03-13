@@ -65,35 +65,42 @@ function setupActions() {
   });
 }
 
-// ── Backend API Integration ────────────────────────────────────
-async function getAIInsight(url, trackers, patterns) {
+// ── Backend API Integration (Bulletproof) ──────────────────────
+async function displayAIInsight(url, trackers, patterns) {
+  // 1. Force the UI box to appear immediately as 'Loading'
+  let insightBox = document.getElementById('ai-insight-box');
+  if (!insightBox) {
+    insightBox = document.createElement('div');
+    insightBox.id = 'ai-insight-box';
+    insightBox.style.cssText = 'background: #1e1e2e; color: #e2e8f0; border-left: 4px solid #6366f1; padding: 12px; margin-top: 15px; font-size: 13px; border-radius: 6px; line-height: 1.5; word-wrap: break-word; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
+    insightBox.innerHTML = '🤖 <strong>AI Insight:</strong> Analyzing with Gemini...';
+
+    // Append to overview tab if it exists, otherwise to body
+    const overviewTab = document.getElementById('tab-content-overview') || document.body;
+    overviewTab.appendChild(insightBox);
+  }
+
+  // 2. Fetch from backend
   try {
-    console.log('[ConsumerShield] Calling backend...');
-    console.log('[ConsumerShield] URL:', url);
-    console.log('[ConsumerShield] Trackers:', trackers);
-    console.log('[ConsumerShield] Patterns:', patterns);
-    
+    console.log('[ConsumerShield] Calling backend for AI insight...');
     const response = await fetch('http://localhost:8000/analyze-complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url: url,
-        privacy_data: {
-          trackers: trackers || [],
-          fingerprinting: false
-        },
-        manipulation_data: {
-          patterns: patterns || []
-        }
+        privacy_data: { trackers: trackers || [], fingerprinting: false },
+        manipulation_data: { patterns: patterns || [] }
       })
     });
+
+    if (!response.ok) throw new Error('Backend returned status ' + response.status);
+
     const data = await response.json();
     console.log('[ConsumerShield] AI response:', data);
-    console.log('[ConsumerShield] AI insight:', data.combined_insight);
-    return data.combined_insight || null;
+    insightBox.innerHTML = '🤖 <strong>Gemini Insight:</strong> ' + (data.combined_insight || 'No insight generated.');
   } catch(e) {
-    console.log('[ConsumerShield] Backend error:', e);
-    return null;
+    insightBox.innerHTML = '🤖 <strong>AI Error:</strong> Could not connect to backend. ' + e.message;
+    console.error('[ConsumerShield] Backend error:', e);
   }
 }
 
@@ -111,45 +118,13 @@ async function loadAndRender() {
       renderOverview(analysis);
       renderPrivacyTab(analysis);
       renderManipulationTab(analysis);
-      
-      // Fetch AI insight from backend
-      const aiInsight = await getAIInsight(
-        tab.url,
+
+      // Fetch and display AI insight (bulletproof — always shows a visible box)
+      displayAIInsight(
+        currentUrl,
         analysis.privacy?.trackers || [],
         analysis.manipulation?.patterns || []
       );
-      if (aiInsight) {
-        displayAIInsight(aiInsight);
-      }
-
-      // Explicit fallback: fetch and display Gemini AI insight at the very end
-      setTimeout(() => {
-        const trackers = analysis.privacy?.trackers || [];
-        const patterns = analysis.manipulation?.patterns || [];
-        
-        getAIInsight(currentUrl, trackers, patterns)
-          .then(insight => {
-            if (!insight) return;
-            const existing = document.getElementById('ai-insight-box');
-            if (existing) existing.remove();
-            
-            const div = document.createElement('div');
-            div.id = 'ai-insight-box';
-            div.style.cssText = 'background:#f0f4ff;border-left:3px solid #4f46e5;padding:10px;margin:10px 0;font-size:12px;border-radius:4px;line-height:1.5;';
-            div.innerHTML = `🤖 <strong>Gemini Insight:</strong> ${insight}`;
-            
-            const overviewTab = document.getElementById('tab-content-overview');
-            if (overviewTab) {
-              const lawsSection = document.getElementById('laws-section');
-              if (lawsSection && lawsSection.style.display !== 'none') {
-                lawsSection.parentNode.insertBefore(div, lawsSection.nextSibling);
-              } else {
-                overviewTab.appendChild(div);
-              }
-            }
-          })
-          .catch(err => console.log('[ConsumerShield] AI insight error:', err));
-      }, 500);
     } else {
       // Retry after 2 seconds (content script may still be running)
       setTimeout(loadAndRender, 2000);
@@ -157,17 +132,7 @@ async function loadAndRender() {
   });
 }
 
-// ── Display AI Insight ────────────────────────────────────────
-function displayAIInsight(insight) {
-  const container = document.getElementById('overall-insight');
-  if (!container) return;
-  
-  const aiDiv = document.createElement('div');
-  aiDiv.id = 'ai-insight';
-  aiDiv.style.cssText = 'background: #f0f4ff; border-left: 3px solid #4f46e5; padding: 10px; margin-top: 10px; font-size: 12px; border-radius: 4px; line-height: 1.5;';
-  aiDiv.innerHTML = `🤖 AI Insight: ${escHtml(insight)}`;
-  container.parentNode.insertBefore(aiDiv, container.nextSibling);
-}
+
 
 // ── Overview tab ──────────────────────────────────────────────
 function renderOverview(a) {

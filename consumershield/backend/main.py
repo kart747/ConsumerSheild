@@ -23,19 +23,20 @@ from regulatory_database import (
 
 load_dotenv()
 
-# ── OpenAI setup (optional) ───────────────────────────────────
-OPENAI_AVAILABLE = False
+# ── Gemini API setup (optional) ──────────────────────────────
+import google.generativeai as genai
+GEMINI_AVAILABLE = False
 try:
-    from openai import OpenAI
-    api_key = os.getenv("OPENAI_API_KEY")
-    if api_key:
-        client = OpenAI(api_key=api_key)
-        OPENAI_AVAILABLE = True
-        print("[ConsumerShield] OpenAI enabled — AI insights active")
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if gemini_key:
+        genai.configure(api_key=gemini_key)
+        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+        GEMINI_AVAILABLE = True
+        print("[ConsumerShield] Gemini enabled")
     else:
-        print("[ConsumerShield] No OPENAI_API_KEY found — using rule-based insights")
-except ImportError:
-    print("[ConsumerShield] openai package not installed — using rule-based insights")
+        print("[ConsumerShield] No GEMINI_API_KEY found — using rule-based insights")
+except Exception as e:
+    print(f"[ConsumerShield] Gemini error: {e}")
 
 # ── App ───────────────────────────────────────────────────────
 app = FastAPI(
@@ -203,51 +204,31 @@ def make_rule_insight(url: str, privacy: PrivacyData, manipulation: Manipulation
     return "No major privacy violations or dark patterns detected on this page. ✅"
 
 async def make_ai_insight(url: str, privacy: PrivacyData, manipulation: ManipulationData) -> str:
-    if not OPENAI_AVAILABLE:
-        return make_rule_insight(url, privacy, manipulation,
-                                 calc_privacy_risk(privacy),
-                                 calc_manipulation_risk(manipulation))
-    try:
-        tracker_names = [t.name for t in privacy.trackers[:5]]
-        pattern_names = [p.name for p in manipulation.patterns[:5]]
-        prompt = f"""You are a consumer rights expert focused on Indian digital law.
-
+    if GEMINI_AVAILABLE:
+        try:
+            prompt = f"""You are a consumer rights expert focused on Indian law.
 Website: {url}
-
-Privacy issues found:
-- Trackers: {len(privacy.trackers)} ({', '.join(tracker_names) or 'none'})
-- Third-party sharing: {privacy.policy.thirdPartySharing if privacy.policy else False}
-- No opt-out: {privacy.policy.noOptOut if privacy.policy else False}
-- Fingerprinting: {privacy.fingerprinting}
-
-Manipulation tactics found:
-- Dark patterns: {len(manipulation.patterns)} ({', '.join(pattern_names) or 'none'})
-
-In 2–3 sentences, explain:
-1. How this site exploits users (privacy + manipulation combined)
-2. Which Indian laws apply (DPDP Act 2023 / CCPA Guidelines 2023)
-3. One actionable recommendation
-
-Be direct, clear, and empowering. No bullet points."""
-
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=180,
-            temperature=0.4,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"[ConsumerShield] OpenAI error: {e}")
-        return make_rule_insight(url, privacy, manipulation,
-                                 calc_privacy_risk(privacy),
-                                 calc_manipulation_risk(manipulation))
+Trackers found: {len(privacy.trackers)}
+Dark patterns found: {len(manipulation.patterns)} ({', '.join([p.name for p in manipulation.patterns[:3]])})
+In 2 sentences explain: how this site exploits users and which Indian law (DPDP Act 2023 / CCPA Guidelines 2023) is violated."""
+            response = gemini_model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            print(f"Gemini error: {e}")
+    return make_rule_insight(url, privacy, manipulation,
+                             calc_privacy_risk(privacy),
+                             calc_manipulation_risk(manipulation))
 
 # ── Endpoints ─────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.0", "ai_enabled": OPENAI_AVAILABLE}
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "gemini_enabled": GEMINI_AVAILABLE,
+        "ai_powered": GEMINI_AVAILABLE
+    }
 
 
 @app.post("/analyze-complete", response_model=CompleteResponse)
@@ -284,7 +265,7 @@ async def analyze_complete(req: CompleteRequest):
         manipulation_insights=m_insights,
         combined_insight=combined,
         regulatory_violations=violations,
-        ai_powered=OPENAI_AVAILABLE,
+        ai_powered=GEMINI_AVAILABLE,
     )
 
 
