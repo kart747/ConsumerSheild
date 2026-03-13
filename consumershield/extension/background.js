@@ -119,6 +119,25 @@ async function sendToBackend(analysis) {
   }
 }
 
+async function fetchDomainIntelligence(detectedDomains, currentTabDomain) {
+  try {
+    const response = await fetch(`${BACKEND_URL}/analyze-domains`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        domains: detectedDomains,
+        first_party_domain: currentTabDomain,
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Message handler
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,6 +146,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'analyzeComplete') {
     const data = request.data;
     const domain = normalizeDomain(data.url);
+    const detectedDomains = [...new Set(
+      (data.privacy?.trackers || [])
+        .map(t => normalizeDomain(t.domain))
+        .filter(Boolean)
+    )];
+    const currentTabDomain = domain;
 
     const privacyRisk = calculatePrivacyRisk(data.privacy);
     const manipulationRisk = calculateManipulationRisk(data.manipulation);
@@ -141,6 +166,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       domain,
       url: data.url,
       timestamp: data.timestamp,
+      domain_analysis: null,
       privacy: {
         ...data.privacy,
         riskScore: privacyRisk,
@@ -165,6 +191,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     // Persist to storage
     chrome.storage.local.set({ [domain]: analysis });
+
+    // Fetch tracker/entity intelligence for known + unknown domains
+    fetchDomainIntelligence(detectedDomains, currentTabDomain)
+      .then((domainIntelligence) => {
+        if (!domainIntelligence) return;
+        chrome.storage.local.get([domain], (result) => {
+          const stored = result[domain] || analysis;
+          stored.domain_analysis = domainIntelligence;
+          chrome.storage.local.set({ [domain]: stored });
+        });
+      })
+      .catch(() => {});
 
     // Update badge on the tab
     const tabId = sender.tab?.id;

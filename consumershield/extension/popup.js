@@ -9,6 +9,7 @@ const TRACKER_ICONS = {
   advertising: '📢',
   social:      '👥',
   data_broker: '🗄️',
+  tracker:     '🛰️',
 };
 
 const SEVERITY_ICONS = {
@@ -139,6 +140,7 @@ function renderOverview(a) {
   const p = a.privacy;
   const m = a.manipulation;
   const o = a.overall;
+  const trackerCount = a.domain_analysis?.resolved_trackers?.length ?? p.trackers?.length ?? 0;
 
   // Privacy score card
   setScore('privacy', p.riskScore, p.riskLevel);
@@ -161,7 +163,7 @@ function renderOverview(a) {
   if (insightEl) insightEl.textContent = o.insight || a.aiInsight || 'Analysis complete. Fetching AI insight...';
 
   // Stats
-  setText('stat-trackers',   p.trackers?.length ?? 0);
+  setText('stat-trackers',   trackerCount);
   setText('stat-patterns',   m.patterns?.length ?? 0);
   setText('stat-violations', o.totalViolations ?? 0);
 
@@ -171,7 +173,7 @@ function renderOverview(a) {
 
   // Laws
   const laws = new Set();
-  if ((p.trackers?.length ?? 0) > 0) laws.add('Digital Personal Data Protection Act 2023 (DPDP)');
+  if (trackerCount > 0) laws.add('Digital Personal Data Protection Act 2023 (DPDP)');
   if (p.policy?.thirdPartySharing || p.policy?.noOptOut) laws.add('DPDP Act 2023 — Section 6, 8, 12');
   if ((m.patterns?.length ?? 0) > 0) laws.add('CCPA Dark Patterns Guidelines 2023');
   if ((m.patterns?.some(p => ['urgency','sneaking'].includes(p.type)))) laws.add('Consumer Protection Act 2019 — Section 2(47)');
@@ -205,30 +207,111 @@ function setBadge(id, score, level) {
   else el.classList.add('ok');
 }
 
+function getGaugeTone(score) {
+  if (score >= 7) return { label: 'High Exposure', bucket: 'high' };
+  if (score >= 4) return { label: 'Moderate Exposure', bucket: 'medium' };
+  return { label: 'Low Exposure', bucket: 'low' };
+}
+
+function getRiskBucket(score) {
+  if (score >= 7) return 'high';
+  if (score >= 4) return 'medium';
+  return 'low';
+}
+
+function inferTrackerType(entry) {
+  const categories = Array.isArray(entry?.categories)
+    ? entry.categories.map(c => String(c).toLowerCase())
+    : [];
+
+  if (categories.some(c => c.includes('advert'))) return 'advertising';
+  if (categories.some(c => c.includes('social'))) return 'social';
+  if (categories.some(c => c.includes('analytic') || c.includes('measurement') || c.includes('telemetry'))) return 'analytics';
+  if (categories.some(c => c.includes('broker') || c.includes('fingerprint'))) return 'data_broker';
+  return 'tracker';
+}
+
+function prettyReason(reason) {
+  if (!reason) return '';
+  return String(reason)
+    .replace(/^keyword:/, 'keyword: ')
+    .replace(/-/g, ' ');
+}
+
 // ── Privacy tab ───────────────────────────────────────────────
 function renderPrivacyTab(a) {
-  const p = a.privacy;
+  const p = a.privacy || {};
+  const domainAnalysis = a.domain_analysis || {};
+  const resolvedTrackers = domainAnalysis.resolved_trackers || [];
+  const suspiciousDomains = domainAnalysis.suspicious_domains || [];
+  const privacyScore = typeof domainAnalysis.total_privacy_score === 'number'
+    ? domainAnalysis.total_privacy_score
+    : (p.riskScore || 0);
 
-  // Trackers — Always display detected trackers regardless of privacy score
+  const tone = getGaugeTone(privacyScore);
+  const gaugeWidth = Math.max(0, Math.min(100, (privacyScore / 10) * 100));
+
+  // Tracker intelligence (known + heuristic)
   const trackerList = document.getElementById('tracker-list');
   if (trackerList) {
-    const trackers = p.trackers ?? [];
-    if (trackers.length === 0) {
-      trackerList.innerHTML = '<div class="safe-state">✅ No known trackers detected</div>';
-    } else {
-      // Always show tracker names and details, even if privacy score is low
-      trackerList.innerHTML = trackers.map(t => `
-        <div class="tracker-item">
-          <div class="item-icon">${TRACKER_ICONS[t.type] || '🔍'}</div>
+    const knownHtml = resolvedTrackers.map(t => {
+      const type = inferTrackerType(t);
+      const icon = TRACKER_ICONS[type] || '🛰️';
+      const displayName = t.entity || t.displayName || 'Unknown Entity';
+      const riskScore = Number(t.privacy_score || 0);
+      return `
+        <div class="tracker-item tracker-item--entity">
+          <div class="item-icon">${icon}</div>
           <div class="item-body">
-            <div class="item-name">${escHtml(t.name)}</div>
-            <div class="item-sub">${escHtml(t.domain)}</div>
-            ${t.source ? `<div class="item-source">Detected via: ${escHtml(t.source)}</div>` : ''}
+            <div class="item-name">${escHtml(displayName)}</div>
+            <div class="item-sub">${escHtml(t.domain || '')}</div>
           </div>
-          <div class="item-badge badge-${t.type}">${escHtml(t.type)}</div>
+          <div class="item-badge badge-${type}">${escHtml(type)}</div>
+          <div class="risk-badge ${getRiskBucket(riskScore)}">${riskScore.toFixed(1)}</div>
         </div>
-      `).join('');
-    }
+      `;
+    }).join('');
+
+    const suspiciousHtml = suspiciousDomains.map(d => {
+      const riskScore = Number(d.privacy_score || 0);
+      const reasons = (d.reasons || []).map(prettyReason).join(', ');
+      return `
+        <div class="tracker-item tracker-item--alert">
+          <div class="item-icon">⚠️</div>
+          <div class="item-body">
+            <div class="item-name">Unidentified Tracking Behavior</div>
+            <div class="item-sub">${escHtml(d.domain || '')}</div>
+            <div class="item-sub">${escHtml(reasons || 'Heuristic anomaly')}</div>
+          </div>
+          <div class="risk-badge ${getRiskBucket(riskScore)}">${riskScore.toFixed(1)}</div>
+        </div>
+      `;
+    }).join('');
+
+    const hasKnown = resolvedTrackers.length > 0;
+    const hasSuspicious = suspiciousDomains.length > 0;
+
+    trackerList.innerHTML = `
+      <div class="privacy-gauge ${tone.bucket}">
+        <div class="privacy-gauge-head">
+          <span>Privacy Health Meter</span>
+          <span>${privacyScore.toFixed(1)}/10 • ${tone.label}</span>
+        </div>
+        <div class="privacy-gauge-track">
+          <div class="privacy-gauge-fill ${tone.bucket}" style="width:${gaugeWidth}%"></div>
+        </div>
+      </div>
+
+      <div class="privacy-subheading">Known Trackers</div>
+      ${hasKnown ? knownHtml : '<div class="empty-state">No known tracker entities matched.</div>'}
+
+      <div class="privacy-subheading">Unidentified Tracking Behavior</div>
+      ${hasSuspicious ? suspiciousHtml : '<div class="empty-state">No heuristic alerts.</div>'}
+
+      ${(!hasKnown && !hasSuspicious)
+        ? '<div class="safe-state">🛡️ Your Privacy is Protected</div>'
+        : ''}
+    `;
   }
 
   // Policy flags
@@ -236,7 +319,7 @@ function renderPrivacyTab(a) {
   const flags = [];
   if (p.policy?.thirdPartySharing) flags.push({ icon: '🔗', label: 'Third-party data sharing detected', detail: 'Your data is shared with external partners.' });
   if (p.policy?.noOptOut)          flags.push({ icon: '🚫', label: 'No opt-out mechanism found', detail: 'You cannot easily withdraw consent.' });
-  if (p.policy?.extensiveCollection) flags.push({ icon: '📦', label: 'Extensive data collection',   detail: 'Site collects location, device, browsing data etc.' });
+  if (p.policy?.extensiveCollection) flags.push({ icon: '📦', label: 'Extensive data collection', detail: 'Site collects location, device, browsing data etc.' });
   if (p.fingerprinting)            flags.push({ icon: '🖼️', label: 'Canvas fingerprinting detected', detail: 'Site attempts to generate a unique ID from your browser.' });
 
   if (policyList) {

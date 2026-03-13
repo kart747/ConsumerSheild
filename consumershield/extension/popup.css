@@ -306,6 +306,52 @@ body {
 /* ── Item Lists ───────────────────────────────────────────── */
 .item-list { display: flex; flex-direction: column; gap: 6px; }
 
+.privacy-gauge {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  margin-bottom: 8px;
+}
+
+.privacy-gauge-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text-secondary);
+}
+
+.privacy-gauge-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.1);
+  overflow: hidden;
+}
+
+.privacy-gauge-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.privacy-gauge-fill.low { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+.privacy-gauge-fill.medium { background: linear-gradient(90deg, #f59e0b, #f97316); }
+.privacy-gauge-fill.high { background: linear-gradient(90deg, #ef4444, #dc2626); }
+
+.privacy-subheading {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  margin: 8px 0 4px;
+}
+
 .tracker-item, .pattern-item, .policy-item, .legal-item {
   background: var(--glass);
   border: 1px solid var(--glass-border);
@@ -318,6 +364,27 @@ body {
   transition: background 0.2s;
 }
 .tracker-item:hover, .pattern-item:hover, .policy-item:hover { background: var(--glass-hover); }
+
+.tracker-item {
+  align-items: center;
+  border-left: 3px solid rgba(96,165,250,0.35);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+.tracker-item--alert {
+  border-left-color: rgba(239,68,68,0.6);
+}
+
+.tracker-item .item-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.08);
+}
 
 .item-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
 .item-body { flex: 1; min-width: 0; }
@@ -338,9 +405,39 @@ body {
 .badge-advertising{ background: rgba(249,115,22,0.2);  color: #fdba74; }
 .badge-social     { background: rgba(167,139,250,0.2); color: #c4b5fd; }
 .badge-data_broker{ background: rgba(239,68,68,0.2);   color: #fca5a5; }
+.badge-tracker    { background: rgba(148,163,184,0.2); color: #cbd5e1; }
 .badge-high    { background: rgba(239,68,68,0.2);  color: #fca5a5; }
 .badge-medium  { background: rgba(234,179,8,0.2);  color: #fde047; }
 .badge-low     { background: rgba(34,197,94,0.2);  color: #86efac; }
+
+.risk-badge {
+  flex-shrink: 0;
+  min-width: 34px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.2px;
+}
+
+.risk-badge.low {
+  background: rgba(59,130,246,0.2);
+  color: #93c5fd;
+  border: 1px solid rgba(59,130,246,0.35);
+}
+
+.risk-badge.medium {
+  background: rgba(249,115,22,0.2);
+  color: #fdba74;
+  border: 1px solid rgba(249,115,22,0.35);
+}
+
+.risk-badge.high {
+  background: rgba(239,68,68,0.2);
+  color: #fca5a5;
+  border: 1px solid rgba(239,68,68,0.35);
+}
 
 .legal-item {
   background: rgba(167,139,250,0.06);
