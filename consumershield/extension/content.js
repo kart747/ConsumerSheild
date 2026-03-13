@@ -336,7 +336,7 @@
     // ─────────────────────────────────────────────────────────────────────
     // SCAN 4: Inline scripts for known tracker calls
     // ─────────────────────────────────────────────────────────────────────
-    const inlineScripts = Array.from(document.querySelectorAll('script:not([src]'));
+    const inlineScripts = Array.from(document.querySelectorAll('script:not([src])'));
     const trackerKeywordMap = {
       'gtag(': { domain: 'google-analytics.com', type: 'analytics', name: 'Google Analytics (inline)' },
       'ga(':   { domain: 'google-analytics.com', type: 'analytics', name: 'Google Analytics (legacy)' },
