@@ -57,16 +57,26 @@
       penalty: '₹10 lakh – ₹50 lakh',
       description: 'Creates artificial scarcity or time pressure to force rushed decisions.',
       patterns: [
-        /only\s*(\d+|one|two|three|few)\s*(left|remaining|in stock)/i,
+        /only\s*(\d+|one|two|three|few|several)\s*(left|remaining|in stock|available|spots)/i,
         /hurry[!,\s]*only/i,
-        /selling\s*fast/i,
-        /limited\s*(time|offer|stock|quantity)/i,
-        /(\d+)\s*people\s*(are\s*)?(viewing|watching|looking at)/i,
-        /sale\s*ends?\s*(in|at)/i,
-        /(\d+)\s*(hours?|mins?|minutes?|seconds?)\s*(left|remaining)/i,
-        /don['']t\s*miss\s*out/i,
-        /last\s*(chance|few|day)/i,
-        /ends?\s*(tonight|today|soon)/i,
+        /selling\s*out|sold\s*out/i,
+        /selling\s*fast|going\s*fast/i,
+        /limited\s*(time|offer|stock|quantity|edition|seats|availability)/i,
+        /(\d+)\s*people\s*(are\s*)?(viewing|watching|looking at|browsing|interested)/i,
+        /sale\s*ends?\s*(in|at|tonight|today|tomorrow|soon)/i,
+        /(\d+)\s*(hours?|mins?|minutes?|seconds?)\s*(left|remaining|till|until)/i,
+        /don'?t\s*miss\s*(out|this|the)/i,
+        /last\s*(chance|opportunity|few|day|hours?|minute)/i,
+        /ends?\s*(tonight|today|noon|midnight|soon|very soon)/i,
+        /act\s*now/i,
+        /before\s*(it's?\s*)?(gone|sold out)/i,
+        /countdown\s*timer|timer\s*countdown/i,
+        /offer\s*expires?/i,
+        /\d+%\s*off.*only.*today/i,
+        /flash\s*sale/i,
+        /exclusive.*limited/i,
+        /buy\s*now/i,
+        /(?:almost|nearly|almost all)\s*(?:gone|sold out|sold)/i,
       ],
     },
     sneaking: {
@@ -77,12 +87,19 @@
       description: 'Hides additional charges until late in the checkout process.',
       patterns: [
         /convenience\s*fee/i,
-        /handling\s*(charges?|fee)/i,
+        /handling\s*(charges?|fee|cost)/i,
         /platform\s*fee/i,
-        /processing\s*(fee|charges?)/i,
-        /\+\s*taxes?\s*&?\s*fees?/i,
-        /additional\s*(charges?|fees?)\s*(may\s*apply|apply)/i,
-        /delivery\s*(fee|charges?)\s*added\s*at\s*checkout/i,
+        /processing\s*(fee|charges?|cost)/i,
+        /\+\s*(?:taxes?|tds)?\s*&?\s*(?:and\s*)?fees?/i,
+        /additional\s*(?:charges?|fees?|costs?)\s*(?:may\s*)?apply/i,
+        /delivery\s*(?:fee|charges?|cost)\s*(?:added\s*)?(?:at\s*|during\s*)?checkout/i,
+        /service\s*(?:fee|charges?)/i,
+        /booking\s*fee/i,
+        /transaction\s*fee/i,
+        /surcharge/i,
+        /(?:see|view|check).*charges.*at.*checkout/i,
+        /final\s*(?:price|total).*may\s*differ/i,
+        /taxes?\s*(?:and\s*)?(?:fees?|duties)\s*(?:to\s*)?(?:be\s*)?(?:added|calculated)/i,
       ],
     },
     confirmshaming: {
@@ -92,12 +109,15 @@
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Uses guilt-inducing language to shame users into accepting offers.',
       patterns: [
-        /no\s*thanks[,.]?\s*i\s*(don['']t|prefer not|hate)/i,
-        /no[,.]?\s*i\s*(enjoy|love|like)\s*(paying|spending|wasting)/i,
-        /i\s*(don['']t|do not)\s*(care|want)\s*(about)?\s*(saving|discount|deal)/i,
-        /skip[,.]?\s*i['']m\s*(fine|okay|good)\s*with\s*(paying|high prices)/i,
-        /no thanks,\s*i\s*(prefer|want)\s*to\s*(pay|miss out)/i,
-        /decline\s*(and)?\s*(pay\s*more|lose|miss)/i,
+        /no\s*(?:thanks?|thanx)[,.]?\s*i\s*(?:don'?t|prefer not|hate|refuse|skip|decline)/i,
+        /no[,.]?\s*i\s*(?:enjoy|love|like|prefer)\s*(?:paying|spending|wasting|overpaying)/i,
+        /i\s*(?:don'?t|do not|really don'?t|never)\s*(?:care|want|need)\s*(?:about|for)?\s*(?:saving|discount|deals?|money)/i,
+        /skip[,.]?\s*i'?m?\s*(?:fine|okay|good|happy)\s*(?:with|without)\s*(?:paying|high prices|full price)/i,
+        /no\s*thanks\s*i\s*prefer\s*to\s*(?:pay|overpay)/i,
+        /decline.*(?:pay more|lose|miss)/i,
+        /i'?d\s*rather\s*(?:not|decline)/i,
+        /maybe\s*later.*let.*miss/i,
+        /turn\s*(?:down|away|decline).*(?:save|offer|deal)/i,
       ],
     },
     trick_questions: {
@@ -107,10 +127,13 @@
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Uses confusing double negatives or ambiguous language on consent forms.',
       patterns: [
-        /uncheck\s*(this\s*box)?\s*(to\s*(not|stop))/i,
-        /do\s*not\s*(un)?check\s*if\s*you\s*do\s*not/i,
-        /opt\s*out\s*of\s*not\s*receiving/i,
-        /untick\s*to\s*receive/i,
+        /uncheck\s*(?:this\s*)?(?:box|if)\s*(?:to\s*)?(?:not|stop|opt[\s-]?out)/i,
+        /do\s*not\s*(?:un)?check\s*(?:if\s*)?you\s*do\s*not\s*want/i,
+        /opt\s*out\s*of\s*(?:not\s*)?receiving/i,
+        /untick\s*(?:to\s*)?(?:opt[\s-]?out|receive|unsubscribe)/i,
+        /leave.*checked.*continue/i,
+        /(?:leaving|keep|keep it)\s*(?:this|this box|it)\s*checked.*(?:means|means you|opt|agree|accept)/i,
+        /double\s*negative/i,
       ],
     },
     forced_continuity: {
@@ -120,12 +143,17 @@
       penalty: '₹25 lakh – ₹50 lakh',
       description: 'Auto-renews subscriptions without clear notice or easy cancellation.',
       patterns: [
-        /automatically\s*(renews?|charged|billed)/i,
-        /auto[\s-]?renew(al)?/i,
-        /cancel\s*(any\s*time|anytime)\s*(after|within)/i,
-        /charged\s*(automatically|unless\s*you\s*cancel)/i,
-        /free\s*trial[.\s]*then\s*(₹|\$|rs\.?)\s*[\d,]+/i,
-        /subscription\s*renews?\s*(monthly|annually|yearly)/i,
+        /automatically\s*(?:renew|charge|bill|debit)(?:ed)?/i,
+        /auto[\s-]?(?:renew|renewal|billing)/i,
+        /cancel\s*(?:any\s*)?time|cancel\s*(?:within|after)/i,
+        /charged\s*(?:automatically|recurring)/i,
+        /free\s*trial.*(?:then\s*)?(?:\$|₹|rs\.?)\s*[\d,\.]+/i,
+        /subscription\s*(?:renews?|billed|charged)\s*(?:monthly|annually|yearly|quarterly)/i,
+        /after.*free.*trial.*will.*charge/i,
+        /continue.*subscription/i,
+        /billing\s*(?:will|by default|automatically)/i,
+        /recurring\s*(?:charges?|billing)/i,
+        /to\s*(?:cancel|stop)\s*(?:subscription|charges?|billing).*(?:contact|call|visit)/i,
       ],
     },
     disguised_ads: {
@@ -135,9 +163,65 @@
       penalty: '₹10 lakh – ₹25 lakh',
       description: 'Presents paid advertisements as organic content or results.',
       patterns: [
-        /sponsored\s+result/i,
-        /ad\s*·/,
-        /promoted\s*(listing|result|product)/i,
+        /sponsored\s*(?:result|post|content|link|listing|product|ad)/i,
+        /(?:^\s*|\s+)ad\s*(?:\s*·|:|\s*-|\s*$)/i,
+        /promoted\s*(?:listing|result|product|post|content|by)/i,
+        /advertisement/i,
+        /from\s*(?:our\s*)?sponsor/i,
+        /in\s*partnership\s*with/i,
+        /partners\s*content/i,
+        /\[ad\]/i,
+        /#ad|#sponsored/i,
+        /brand\s*content/i,
+      ],
+    },
+    misdirection: {
+      name: 'Misdirection',
+      severity: 'medium',
+      law: 'CCPA Dark Patterns Guidelines 2023 — Misdirection',
+      penalty: '₹10 lakh – ₹25 lakh',
+      description: 'Directs users toward unintended options through visual or hierarchical emphasis.',
+      patterns: [
+        /(?:highly\s*|most\s*|top\s*)?recommended/i,
+        /best.*seller|best.*choice/i,
+        /customers?\s*(?:also\s*)?(?:like|buy|chose|prefer)/i,
+        /popular\s*(?:choice|item|product)/i,
+        /trending/i,
+        /(?:click\s*|tap\s*)?here\s*for\s*(?:savings?|discount|deal)/i,
+        /pre[\s-]?selected/i,
+        /default.*(?:yes|selected|opted)/i,
+        /(?:yes|true|agree|accept).*by\s*default/i,
+      ],
+    },
+    nagging: {
+      name: 'Nagging / Persistent Prompts',
+      severity: 'medium',
+      law: 'CCPA Dark Patterns Guidelines 2023 — Nagging',
+      penalty: '₹10 lakh – ₹25 lakh',
+      description: 'Repeatedly prompts or nags users to take an action.',
+      patterns: [
+        /(?:newsletter|subscription|notification|offer|deal|popup|modal).*(?:subscribe|sign[\s-]?up|get|receive)/i,
+        /(?:don'?t|never).*(?:show|tell|remind) .*again/i,
+        /subscribe.*newsletter|newsletter.*subscribe/i,
+        /get\s*(?:the latest|updates?|offers?|deals?|notifications?)/i,
+        /sign\s*up\s*(?:for|to)/i,
+        /stay\s*(?:updated|informed|in\s*touch)/i,
+        /join.*(?:our\s*)?(?:community|list|subscribers)/i,
+      ],
+    },
+    obstruction: {
+      name: 'Obstruction / Roach Motel',
+      severity: 'high',
+      law: 'CCPA Dark Patterns Guidelines 2023 — Obstruction',
+      penalty: '₹25 lakh – ₹50 lakh',
+      description: 'Makes it difficult to cancel subscriptions, delete accounts, or compare alternatives.',
+      patterns: [
+        /to\s*(?:cancel|delete|unsubscribe|opt[\s-]?out)[,.]?\s*(?:call|contact|visit|go\s*to|email)/i,
+        /cancel.*(?:by\s*)?(?:phone|calling|mail|email|customer\s*service)/i,
+        /speak.*(?:to|with).*(?:an?\s*)?agent.*(?:to\s*)?cancel/i,
+        /delete\s*account.*(?:contact|call|email)/i,
+        /(?:cannot|can't|unable|not possible).*(?:cancel|delete|unsubscribe).*online/i,
+        /logout.*automatic.*re[\s-]?enable/i,
       ],
     },
     preselected: {
@@ -148,18 +232,6 @@
       description: 'Automatically selects options that benefit the company over the user.',
       patterns: [],   // detected via DOM inspection below
       domCheck: true,
-    },
-    obstruction: {
-      name: 'Obstruction / Roach Motel',
-      severity: 'high',
-      law: 'CCPA Dark Patterns Guidelines 2023 — Obstruction',
-      penalty: '₹25 lakh – ₹50 lakh',
-      description: 'Makes it difficult to cancel subscriptions, delete accounts, or compare alternatives.',
-      patterns: [
-        /to\s*(cancel|delete|unsubscribe)[,]?\s*(call|contact|visit|go to)\s*(us|our|the)/i,
-        /cancel\s*(by\s*)?(phone|calling)/i,
-        /speak\s*(to|with)\s*(an?)?\s*agent\s*to\s*cancel/i,
-      ],
     },
   };
 
@@ -322,6 +394,12 @@
 
     // Pre-selected checkboxes / radio buttons
     detectPreselectedOptions();
+    
+    // DOM-based detections for visual patterns
+    detectCountdownTimers();
+    detectStickyBanners();
+    detectModalsAndPopups();
+    detectDifficultCancellation();
   }
 
   function detectPreselectedOptions() {
@@ -350,6 +428,123 @@
         const parent = el.closest('label') || el.parentElement;
         if (parent) applyOverlay(parent, 'manipulation', 'Pre-selected Option');
       });
+    }
+  }
+
+  // DOM-based dark pattern detection functions
+  function detectCountdownTimers() {
+    const timerElements = Array.from(document.querySelectorAll('*')).filter(el => {
+      const text = el.textContent || '';
+      const isTimer = text.match(/\d+\s*(?:hours?|mins?|minutes?|seconds?)\s*(?:left|remaining)/i);
+      const isVisible = el.offsetHeight > 0 && window.getComputedStyle(el).display !== 'none';
+      const isReasonableSize = el.offsetWidth > 30 && el.offsetHeight > 12;
+      return isTimer && isVisible && isReasonableSize;
+    });
+
+    if (timerElements.length > 0) {
+      const existing = state.patterns.find(p => p.type === 'urgency' && p.text === 'Countdown Timer');
+      if (!existing) {
+        state.patterns.push({
+          type: 'urgency',
+          name: 'Countdown Timer',
+          severity: 'high',
+          confidence: 0.9,
+          law: DARK_PATTERNS.urgency.law,
+          penalty: DARK_PATTERNS.urgency.penalty,
+          description: 'Countdown timer detected to create artificial urgency.',
+          element: timerElements[0],
+          text: 'Countdown Timer',
+        });
+      }
+      timerElements.slice(0, 3).forEach(el => applyOverlay(el, 'manipulation', 'Countdown Timer'));
+    }
+  }
+
+  function detectStickyBanners() {
+    const stickyBanners = Array.from(document.querySelectorAll('[style*="position"][style*="sticky"], [style*="position"][style*="fixed"]')).filter(el => {
+      const text = (el.textContent || '').toLowerCase();
+      const hasUrgency = text.match(/urgent|hurry|now|limited|only|ends?|sale|offer|deal|buy|subscribe|sign up/i);
+      const isVisible = el.offsetHeight > 0 && window.getComputedStyle(el).display !== 'none';
+      const notTooLarge = el.offsetHeight < 400;
+      return isVisible && hasUrgency && notTooLarge;
+    });
+
+    if (stickyBanners.length > 0) {
+      const existing = state.patterns.find(p => p.type === 'urgency' && p.text === 'Sticky Banner');
+      if (!existing) {
+        state.patterns.push({
+          type: 'urgency',
+          name: 'Sticky Urgency Banner',
+          severity: 'high',
+          confidence: 0.88,
+          law: DARK_PATTERNS.urgency.law,
+          penalty: DARK_PATTERNS.urgency.penalty,
+          description: 'Persistent banner with urgency language designed to distract and pressure.',
+          element: stickyBanners[0],
+          text: 'Sticky Banner',
+        });
+      }
+      stickyBanners.slice(0, 2).forEach(el => applyOverlay(el, 'manipulation', 'Sticky Urgency Banner'));
+    }
+  }
+
+  function detectModalsAndPopups() {
+    const modals = document.querySelectorAll('[role="dialog"], .modal, .popup, [class*="modal"], [id*="popup"], [class*="overlay"]');
+    const visibleModals = Array.from(modals).filter(el => {
+      const isVisible = el.offsetHeight > 0 && window.getComputedStyle(el).display !== 'none' && window.getComputedStyle(el).visibility !== 'hidden';
+      const notTooBig = el.offsetHeight < 800 && el.offsetWidth < 800;
+      return isVisible && notTooBig;
+    });
+
+    if (visibleModals.length > 0) {
+      const existing = state.patterns.find(p => p.type === 'nagging');
+      if (!existing) {
+        state.patterns.push({
+          type: 'nagging',
+          name: 'Intrusive Modals',
+          severity: 'medium',
+          confidence: 0.8,
+          law: DARK_PATTERNS.nagging.law,
+          penalty: DARK_PATTERNS.nagging.penalty,
+          description: `${visibleModals.length} modal(s) or popup(s) detected to interrupt user experience.`,
+          element: visibleModals[0],
+          text: `${visibleModals.length} modal/popup detected`,
+        });
+      }
+      visibleModals.forEach(el => applyOverlay(el, 'manipulation', 'Intrusive Modal'));
+    }
+  }
+
+  function detectDifficultCancellation() {
+    const bodyText = (document.body?.innerText || '').toLowerCase();
+    const hasSubscription = bodyText.match(/subscribe|newsletter|unsubscribe|membership|account/i);
+    
+    if (hasSubscription) {
+      const cancelLinks = document.querySelectorAll('[href*="unsubscribe"], [href*="cancel"], [href*="delete"]');
+      const cancelButtons = document.querySelectorAll('button[aria-label*="cancel" i], button[title*="cancel" i], button[aria-label*="unsubscribe" i]');
+      
+      const allCancelElements = Array.from([...cancelLinks, ...cancelButtons]);
+      const isBuried = allCancelElements.length === 0 || allCancelElements.every(el => {
+        const rect = el.getBoundingClientRect();
+        return rect.height < 15 || rect.width < 30 || window.getComputedStyle(el).display === 'none';
+      });
+
+      if (isBuried && hasSubscription) {
+        const existing = state.patterns.find(p => p.type === 'obstruction' && p.text === 'Difficult Cancellation');
+        if (!existing) {
+          state.patterns.push({
+            type: 'obstruction',
+            name: 'Difficult Cancellation',
+            severity: 'high',
+            confidence: 0.75,
+            law: DARK_PATTERNS.obstruction.law,
+            penalty: DARK_PATTERNS.obstruction.penalty,
+            description: 'Unsubscribe or cancel button is hidden, buried, or non-functional.',
+            element: allCancelElements[0] || document.body,
+            text: 'Difficult Cancellation',
+          });
+        }
+      }
     }
   }
 
