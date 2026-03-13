@@ -282,89 +282,40 @@
   // ═══════════════════════════════════════════════════════════════════════════
 
   function detectTrackers() {
-    const found = new Set();
-    const currentDomain = window.location.hostname;
+    const found = [];
+    const pageHTML = document.documentElement.innerHTML;
+    const seenNames = new Set();
 
-    // ─────────────────────────────────────────────────────────────────────
-    // SCAN 1: Explicit script[src] attribute scanning
-    // ─────────────────────────────────────────────────────────────────────
-    const scriptElements = Array.from(document.querySelectorAll('script[src]'));
-    scriptElements.forEach(scriptEl => {
-      const scriptSrc = scriptEl.src || '';
-      if (!scriptSrc) return;
-      KNOWN_TRACKERS.forEach(tracker => {
-        if (scriptSrc.includes(tracker.domain) && !found.has(tracker.domain)) {
-          found.add(tracker.domain);
-          state.trackers.push({ ...tracker, source: 'script[src]', url: scriptSrc });
-        }
-      });
-    });
+    const TRACKERS = [
+      { domain: 'google-analytics.com', type: 'analytics', name: 'Google Analytics' },
+      { domain: 'googletagmanager.com', type: 'analytics', name: 'Google Tag Manager' },
+      { domain: 'googlesyndication.com', type: 'advertising', name: 'Google AdSense' },
+      { domain: 'connect.facebook.net', type: 'social', name: 'Facebook Pixel' },
+      { domain: 'doubleclick.net', type: 'advertising', name: 'DoubleClick' },
+      { domain: 'hotjar.com', type: 'analytics', name: 'Hotjar' },
+      { domain: 'clevertap.com', type: 'analytics', name: 'CleverTap' },
+      { domain: 'webengage.com', type: 'analytics', name: 'WebEngage' },
+      { domain: 'moengage.com', type: 'analytics', name: 'MoEngage' },
+      { domain: 'criteo.com', type: 'advertising', name: 'Criteo' },
+      { domain: 'taboola.com', type: 'advertising', name: 'Taboola' },
+    ];
 
-    // ─────────────────────────────────────────────────────────────────────
-    // SCAN 2: Explicit iframe, img, link scanning
-    // ─────────────────────────────────────────────────────────────────────
-    const resourceElements = Array.from(document.querySelectorAll('iframe[src], img[src], link[href]'));
-    resourceElements.forEach(el => {
-      const src = el.src || el.href || '';
-      if (!src) return;
-      KNOWN_TRACKERS.forEach(tracker => {
-        if (src.includes(tracker.domain) && !found.has(tracker.domain)) {
-          found.add(tracker.domain);
-          state.trackers.push({ ...tracker, source: 'resource_element', url: src });
-        }
-      });
-    });
-
-    // ─────────────────────────────────────────────────────────────────────
-    // SCAN 3: Network requests via performance.getEntriesByType('resource')
-    // ─────────────────────────────────────────────────────────────────────
-    try {
-      const networkRequests = performance.getEntriesByType('resource');
-      networkRequests.forEach(req => {
-        const reqName = req.name || '';
-        KNOWN_TRACKERS.forEach(tracker => {
-          if (reqName.includes(tracker.domain) && !found.has(tracker.domain)) {
-            found.add(tracker.domain);
-            state.trackers.push({ ...tracker, source: 'network_request', url: reqName });
-          }
-        });
-      });
-    } catch {
-      // Performance API might be restricted; skip silently
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // SCAN 4: Inline scripts for known tracker calls
-    // ─────────────────────────────────────────────────────────────────────
-    const inlineScripts = Array.from(document.querySelectorAll('script:not([src])'));
-    const trackerKeywordMap = {
-      'gtag(': { domain: 'google-analytics.com', type: 'analytics', name: 'Google Analytics (inline)' },
-      'ga(':   { domain: 'google-analytics.com', type: 'analytics', name: 'Google Analytics (legacy)' },
-      'fbq(':  { domain: 'facebook.com', type: 'social', name: 'Facebook Pixel (inline)' },
-      'mixpanel.track': { domain: 'mixpanel.com', type: 'analytics', name: 'Mixpanel (inline)' },
-      'amplitude.getInstance': { domain: 'amplitude.com', type: 'analytics', name: 'Amplitude (inline)' },
-    };
-
-    inlineScripts.forEach(el => {
-      const text = el.textContent || '';
-      Object.entries(trackerKeywordMap).forEach(([kw, tracker]) => {
-        if (text.includes(kw) && !found.has(tracker.domain)) {
-          found.add(tracker.domain);
-          state.trackers.push({ ...tracker, source: 'inline_script' });
-        }
-      });
+    TRACKERS.forEach(tracker => {
+      if (pageHTML.includes(tracker.domain) && !seenNames.has(tracker.name)) {
+        seenNames.add(tracker.name);
+        found.push({ domain: tracker.domain, type: tracker.type, name: tracker.name });
+        state.trackers.push({ domain: tracker.domain, type: tracker.type, name: tracker.name });
+      }
     });
 
     // Canvas fingerprinting signal
-    const src = document.documentElement.innerHTML;
     if (
-      src.includes('getImageData') && src.includes('canvas') ||
-      src.includes('HTMLCanvasElement') && src.includes('toDataURL')
+      pageHTML.includes('getImageData') && pageHTML.includes('canvas') ||
+      pageHTML.includes('HTMLCanvasElement') && pageHTML.includes('toDataURL')
     ) {
       state.fingerprinting = true;
     }
     
-    // DEBUG: Log tracker detection results
     console.log('[ConsumerShield] Trackers found:', state.trackers);
   }
 
