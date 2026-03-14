@@ -13,6 +13,7 @@ import asyncio
 import json
 import base64
 import math
+import logging
 import re
 import time
 import uuid
@@ -25,7 +26,6 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import json
-from transformers import pipeline
 from sqlalchemy.orm import Session
 
 from regulatory_database import (
@@ -38,6 +38,7 @@ from database import (
     SessionLocal,
     init_db,
     get_db,
+    clear_reports_table,
     build_canonical_payload,
     canonical_payload_to_json,
     encode_pattern_names,
@@ -50,6 +51,7 @@ from ethereum_anchor import (
     build_report_sha256,
     build_report_keccak,
     store_precomputed_hash_on_chain,
+    inspect_transaction_state,
     verify_report_hash_on_chain,
     DuplicateReportAnchoringError,
 )
@@ -61,8 +63,12 @@ load_dotenv(os.path.join(REPO_DIR, ".env"))
 load_dotenv()
 
 # ── Gemini API setup (new google.genai SDK) ──────────────────
-from google import genai as _genai_sdk
-from google.genai import types as _genai_types
+try:
+    from google import genai as _genai_sdk
+    from google.genai import types as _genai_types
+except Exception:
+    _genai_sdk = None
+    _genai_types = None
 
 # Digital Forensic Auditor persona — used as Gemini system instruction
 FORENSIC_AUDITOR_SYSTEM_INSTRUCTION = (
@@ -108,7 +114,16 @@ _GEMINI_MODEL_CANDIDATES = _load_model_candidates_from_env(MODELS_TO_TRY)
 _GEMINI_MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
 _GEMINI_GLOBAL_COOLDOWN_UNTIL: float = 0.0
 
-DARK_PATTERN_THRESHOLD = 6.0
+DARK_PATTERN_THRESHOLD = 7.0
+logger = logging.getLogger("consumershield.anchor")
+
+
+def _configured_contract_address() -> Optional[str]:
+    for env_name in ("CONTRACT_ADDRESS", "EVIDENCE_REGISTRY_CONTRACT_ADDRESS"):
+        value = os.getenv(env_name)
+        if value and value.strip():
+            return value.strip()
+    return None
 
 
 def _extract_retry_seconds_from_error(error_text: str) -> Optional[int]:
@@ -126,10 +141,12 @@ def _extract_retry_seconds_from_error(error_text: str) -> Optional[int]:
 
 try:
     gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key:
+    if gemini_key and _genai_sdk is not None:
         _gemini_client = _genai_sdk.Client(api_key=gemini_key)
         GEMINI_AVAILABLE = True
         print(f"[ConsumerShield] Gemini enabled ({GEMINI_MODEL_NAME})")
+    elif gemini_key and _genai_sdk is None:
+        print("[ConsumerShield] GEMINI_API_KEY set but google.genai SDK not installed — using rule-based insights")
     else:
         print("[ConsumerShield] No GEMINI_API_KEY found — using rule-based insights")
 except Exception as e:
@@ -138,9 +155,11 @@ except Exception as e:
 # ── Local BERT model for dark pattern classification ──────────
 LOCAL_NLP_AVAILABLE = False
 try:
+    from transformers import pipeline as hf_pipeline
+
     print("[ConsumerShield] Loading local BERT model...")
     # Using a lightweight model fine-tuned specifically for dark patterns
-    nlp_classifier = pipeline("text-classification", model="aditizingre07/distilroberta-dark-pattern")
+    nlp_classifier = hf_pipeline("text-classification", model="aditizingre07/distilroberta-dark-pattern")
     LOCAL_NLP_AVAILABLE = True
     print("[ConsumerShield] Local BERT loaded successfully!")
 except Exception as e:
@@ -551,6 +570,12 @@ class StoredReportResponse(BaseModel):
     report_id: str
     url: str
     domain: str
+    risk_score: float
+    detected_patterns: List[str]
+    details: Optional[str] = None
+    timestamp: str
+    blockchain_proof: bool
+    blockchain_tx_hash: Optional[str] = None
     report_hash: str
     canonical_payload_json: str
     tx_hash: Optional[str] = None
@@ -600,6 +625,7 @@ class WallOfShameItem(BaseModel):
     timestamp: str
     blockchain_proof: bool
     blockchain_tx_hash: Optional[str] = None
+    contract_address: Optional[str] = None
 
 # ── Risk Calculators ──────────────────────────────────────────
 
@@ -1424,9 +1450,106 @@ def _meets_anchor_threshold(report: ReportRecord) -> bool:
     return _effective_anchor_risk(report) > DARK_PATTERN_THRESHOLD
 
 
+def _reconcile_anchor_state_from_chain(db: Session, report: ReportRecord) -> ReportRecord:
+    """Resolve stale DB anchor states when a tx hash already exists."""
+    if not report:
+        return report
+
+    tx_hash = str(report.blockchain_tx_hash or report.tx_hash or "").strip()
+    if not tx_hash:
+        return report
+
+    # Fast path: already consistent.
+    if report.anchor_status == "anchored" and bool(report.blockchain_proof):
+        return report
+
+    try:
+        chain_state = inspect_transaction_state(tx_hash)
+    except Exception as exc:
+        logger.warning(
+            "Anchor reconcile skipped. report_id=%s tx_hash=%s reason=%s",
+            report.report_id,
+            tx_hash,
+            exc,
+        )
+        return report
+
+    state = str(chain_state.get("state") or "").strip().lower()
+    receipt_status = chain_state.get("receipt_status")
+    logger.info(
+        "Anchor reconcile inspected. report_id=%s tx_hash=%s state=%s receipt_status=%s",
+        report.report_id,
+        tx_hash,
+        state,
+        receipt_status,
+    )
+
+    changed = False
+
+    if state == "mined_success":
+        if (
+            not bool(report.blockchain_proof)
+            or report.anchor_status != "anchored"
+            or (report.blockchain_tx_hash or "") != tx_hash
+            or (report.tx_hash or "") != tx_hash
+            or report.anchor_error
+        ):
+            report.blockchain_proof = True
+            report.blockchain_tx_hash = tx_hash
+            report.tx_hash = tx_hash
+            report.anchor_status = "anchored"
+            report.anchor_error = None
+            changed = True
+    elif state in {"mined_failed", "dropped"}:
+        failure_reason = (
+            "transaction_reverted_on_chain"
+            if state == "mined_failed"
+            else "transaction_dropped_before_mining"
+        )
+        if (
+            bool(report.blockchain_proof)
+            or report.anchor_status != "failed"
+            or report.anchor_error != failure_reason
+            or (report.blockchain_tx_hash or "") != tx_hash
+            or (report.tx_hash or "") != tx_hash
+        ):
+            report.blockchain_proof = False
+            report.blockchain_tx_hash = tx_hash
+            report.tx_hash = tx_hash
+            report.anchor_status = "failed"
+            report.anchor_error = failure_reason
+            changed = True
+    else:
+        # Transaction exists but has no receipt yet.
+        if report.anchor_status != "pending" or report.anchor_error:
+            report.anchor_status = "pending"
+            report.anchor_error = None
+            changed = True
+
+    if changed:
+        db.commit()
+        db.refresh(report)
+        logger.info(
+            "Anchor reconcile DB update. report_id=%s tx_hash=%s anchor_status=%s blockchain_proof=%s",
+            report.report_id,
+            tx_hash,
+            report.anchor_status,
+            report.blockchain_proof,
+        )
+
+    return report
+
+
 def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
     if not report:
         return report
+
+    existing_tx_hash = str(report.blockchain_tx_hash or report.tx_hash or "").strip()
+    if existing_tx_hash:
+        report = _reconcile_anchor_state_from_chain(db, report)
+        # Avoid duplicate submissions while an existing tx is pending.
+        if report.anchor_status in {"anchored", "failed", "pending"}:
+            return report
 
     if not _meets_anchor_threshold(report):
         report.anchor_status = "not_required"
@@ -1478,6 +1601,12 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
         report.verification_status = "pending"
         report.verification_error = None
         report.verified_at = None
+        logger.info(
+            "Anchor reused from duplicate. report_id=%s duplicate_report_id=%s tx_hash=%s",
+            report.report_id,
+            duplicate.report_id,
+            duplicate.blockchain_tx_hash,
+        )
         db.commit()
         db.refresh(report)
 
@@ -1493,6 +1622,7 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
         return report
 
     try:
+        logger.info("Anchoring start. report_id=%s report_hash=%s", report.report_id, report_hash)
         tx_hash = store_precomputed_hash_on_chain(report_hash)
         report.blockchain_proof = True
         report.blockchain_tx_hash = tx_hash
@@ -1502,6 +1632,7 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
         report.verification_status = "pending"
         report.verification_error = None
         report.verified_at = None
+        logger.info("Anchoring receipt success. report_id=%s tx_hash=%s", report.report_id, tx_hash)
     except DuplicateReportAnchoringError:
         # Hash already on-chain from a prior transaction — treat as anchored.
         report.blockchain_proof = True
@@ -1510,6 +1641,11 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
         report.verification_status = "pending"
         report.verification_error = None
         report.verified_at = None
+        logger.info(
+            "Anchoring duplicate on-chain. report_id=%s report_hash=%s",
+            report.report_id,
+            report_hash,
+        )
     except Exception as exc:
         report.blockchain_proof = False
         report.blockchain_tx_hash = None
@@ -1519,6 +1655,12 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
         report.verification_status = "verification_error"
         report.verification_error = str(exc)
         report.verified_at = None
+        logger.error(
+            "Anchoring failed. report_id=%s report_hash=%s error=%s",
+            report.report_id,
+            report_hash,
+            exc,
+        )
 
     db.commit()
     db.refresh(report)
@@ -1533,6 +1675,14 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
             report.verified_at = None
             db.commit()
             db.refresh(report)
+
+    logger.info(
+        "Anchoring DB update. report_id=%s tx_hash=%s anchor_status=%s blockchain_proof=%s",
+        report.report_id,
+        report.blockchain_tx_hash or report.tx_hash,
+        report.anchor_status,
+        report.blockchain_proof,
+    )
 
     return report
 
@@ -1622,12 +1772,23 @@ def _build_report_metadata(record: ReportRecord) -> Dict[str, Any]:
     }
 
 
+def _format_utc_timestamp(value: Optional[datetime]) -> str:
+    return value.isoformat() + "Z" if value else ""
+
+
 def _stored_report_to_response(record: ReportRecord) -> StoredReportResponse:
-    created_at = record.created_at.isoformat() + "Z" if record.created_at else ""
+    timestamp = _format_utc_timestamp(record.timestamp or record.created_at)
+    created_at = _format_utc_timestamp(record.created_at)
     return StoredReportResponse(
         report_id=record.report_id,
         url=record.url,
         domain=record.domain,
+        risk_score=float(record.risk_score or 0.0),
+        detected_patterns=decode_detected_patterns(record.detected_patterns or record.pattern_names_json),
+        details=record.details or record.combined_insight,
+        timestamp=timestamp,
+        blockchain_proof=bool(record.blockchain_proof),
+        blockchain_tx_hash=record.blockchain_tx_hash or record.tx_hash,
         report_hash=record.report_hash,
         canonical_payload_json=record.canonical_payload,
         tx_hash=record.tx_hash,
@@ -1651,11 +1812,19 @@ def _anchor_report_worker(report_id: str) -> None:
     db = SessionLocal()
     report: Optional[ReportRecord] = None
     try:
+        logger.info("Anchor worker start. report_id=%s", report_id)
         report = db.query(ReportRecord).filter(ReportRecord.report_id == report_id).first()
         if not report:
+            logger.warning("Anchor worker report missing. report_id=%s", report_id)
             return
 
         _anchor_report_if_needed(db, report)
+        logger.info(
+            "Anchor worker done. report_id=%s anchor_status=%s tx_hash=%s",
+            report.report_id,
+            report.anchor_status,
+            report.blockchain_tx_hash or report.tx_hash,
+        )
     except Exception as exc:
         if report:
             report.anchor_status = "failed"
@@ -1664,6 +1833,7 @@ def _anchor_report_worker(report_id: str) -> None:
             report.verification_error = str(exc)
             report.verified_at = None
             db.commit()
+        logger.error("Anchor worker exception. report_id=%s error=%s", report_id, exc)
     finally:
         db.close()
 
@@ -1687,7 +1857,9 @@ def health():
 async def analyze_complete(req: CompleteRequest, db: Session = Depends(get_db)):
     p_risk = calc_privacy_risk(req.privacy_data)
     m_risk = calc_manipulation_risk(req.manipulation_data)
-    o_risk = round((p_risk + m_risk) / 2, 1)
+    # Keep backend consistent with extension-side risk evaluation:
+    # overall risk is the stronger of privacy/manipulation signals.
+    o_risk = max(p_risk, m_risk)
 
     p_level = get_risk_level(p_risk)
     m_level = get_risk_level(m_risk)
@@ -1788,6 +1960,7 @@ async def save_report(
         tracker_count=tracker_count_value,
     )
     if duplicate:
+        duplicate = _reconcile_anchor_state_from_chain(db, duplicate)
         if req.anchor_on_save and _meets_anchor_threshold(duplicate) and duplicate.anchor_status not in {"anchored", "pending"}:
             duplicate.anchor_status = "pending"
             duplicate.anchor_error = None
@@ -1847,21 +2020,40 @@ async def save_report(
 
 @app.get("/reports", response_model=List[StoredReportResponse])
 def list_reports(
-    limit: int = 50,
+    limit: Optional[int] = None,
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    safe_limit = min(max(limit, 1), 200)
     safe_offset = max(offset, 0)
 
-    rows = (
+    query = (
         db.query(ReportRecord)
-        .order_by(ReportRecord.created_at.desc())
-        .offset(safe_offset)
-        .limit(safe_limit)
-        .all()
+        .order_by(ReportRecord.timestamp.desc(), ReportRecord.created_at.desc())
     )
-    return [_stored_report_to_response(row) for row in rows]
+
+    if safe_offset:
+        query = query.offset(safe_offset)
+    if limit is not None:
+        safe_limit = min(max(limit, 1), 1000)
+        query = query.limit(safe_limit)
+
+    rows = query.all()
+    reconciled: List[ReportRecord] = []
+    for row in rows:
+        has_tx_hash = bool(str(row.blockchain_tx_hash or row.tx_hash or "").strip())
+        if has_tx_hash and row.anchor_status != "anchored":
+            row = _reconcile_anchor_state_from_chain(db, row)
+        reconciled.append(row)
+    return [_stored_report_to_response(row) for row in reconciled]
+
+
+@app.post("/clear-reports")
+def clear_reports():
+    deleted_reports = clear_reports_table()
+    return {
+        "status": "reports table cleared",
+        "deleted_reports": deleted_reports,
+    }
 
 
 @app.get("/reports/{report_id}", response_model=StoredReportResponse)
@@ -1882,11 +2074,13 @@ def trigger_report_anchor(
     if not row:
         raise HTTPException(status_code=404, detail="Report not found")
 
-    if row.anchor_status == "anchored" and row.tx_hash:
+    row = _reconcile_anchor_state_from_chain(db, row)
+
+    if row.anchor_status == "anchored" and (row.tx_hash or row.blockchain_tx_hash):
         return TriggerAnchorResponse(
             report_id=row.report_id,
             anchor_status=row.anchor_status,
-            tx_hash=row.tx_hash,
+            tx_hash=row.tx_hash or row.blockchain_tx_hash,
             detail="Report already anchored",
         )
 
@@ -1960,9 +2154,10 @@ async def verify_report_integrity(report_id: str, db: Session = Depends(get_db))
 
 
 @app.get("/wall-of-shame", response_model=List[WallOfShameItem])
-def wall_of_shame(limit: int = 50, db: Session = Depends(get_db)):
-    safe_limit = min(max(limit, 1), 200)
-    rows = (
+def wall_of_shame(limit: Optional[int] = None, db: Session = Depends(get_db)):
+    contract_address = _configured_contract_address()
+
+    query = (
         db.query(ReportRecord)
         .filter(
             ReportRecord.risk_score > DARK_PATTERN_THRESHOLD,
@@ -1970,12 +2165,20 @@ def wall_of_shame(limit: int = 50, db: Session = Depends(get_db)):
             ReportRecord.verification_status == "verified",
         )
         .order_by(ReportRecord.risk_score.desc(), ReportRecord.timestamp.desc())
-        .limit(safe_limit)
-        .all()
     )
+
+    if limit is not None:
+        safe_limit = min(max(limit, 1), 1000)
+        query = query.limit(safe_limit)
+
+    rows = query.all()
 
     results: List[WallOfShameItem] = []
     for row in rows:
+        has_tx_hash = bool(str(row.blockchain_tx_hash or row.tx_hash or "").strip())
+        if has_tx_hash and row.anchor_status != "anchored":
+            row = _reconcile_anchor_state_from_chain(db, row)
+
         ts = row.timestamp or row.created_at
         results.append(
             WallOfShameItem(
@@ -1985,6 +2188,7 @@ def wall_of_shame(limit: int = 50, db: Session = Depends(get_db)):
                 timestamp=ts.isoformat() + "Z" if ts else "",
                 blockchain_proof=bool(row.blockchain_proof),
                 blockchain_tx_hash=row.blockchain_tx_hash or row.tx_hash,
+                contract_address=contract_address,
             )
         )
     return results
@@ -1992,6 +2196,20 @@ def wall_of_shame(limit: int = 50, db: Session = Depends(get_db)):
 
 @app.post("/analyze-domains", response_model=AnalyzeDomainsResponse)
 async def analyze_domains(req: AnalyzeDomainsRequest):
+    # Temporary debug log for runtime validation of request shape.
+    payload_log = json.dumps(
+        {
+            "domains": req.domains,
+            "first_party_domain": req.first_party_domain,
+        },
+        default=str,
+    )
+    print(f"[ConsumerShield] analyze-domains request payload: {payload_log}")
+    logger.info(
+        "analyze-domains request payload: %s",
+        payload_log,
+    )
+
     first_party = normalize_domain(req.first_party_domain or "")
 
     unique_domains: List[str] = []
@@ -2090,38 +2308,6 @@ async def analyze_privacy(req: PrivacyOnlyRequest, db: Session = Depends(get_db)
         "violations": violations,
         **_build_report_metadata(stored_report),
     }
-
-
-@app.post("/analyze-domains")
-async def analyze_domains(domains: List[str]):
-    found_trackers = []
-    
-    # Process only unique domains
-    unique_domains = list(set(domains))
-    
-    for d in unique_domains:
-        # Check if the domain or its parent variants are in our 'Radar Lite'
-        # e.g., check 'sub.ad.google.com', then 'ad.google.com', then 'google.com'
-        parts = d.split('.')
-        for i in range(len(parts) - 1):
-            check_domain = '.'.join(parts[i:])
-            if check_domain in radar_lookup:
-                entity_info = radar_lookup[check_domain]
-                prevalence = entity_info.get('prevalence', 0)
-                
-                # Assign rough types based on entity name or simple heuristics
-                # The Tracker Radar provides categories, but since we optimized it out in radar_lite.py,
-                # we will default to 'advertising' or 'analytics' if prevalence is high
-                t_type = "advertising" if prevalence > 0.05 else "analytics"
-                
-                found_trackers.append({
-                    "domain": d,
-                    "type": t_type, 
-                    "name": entity_info.get('displayName', 'Unknown Entity')
-                })
-                break # Matched the most specific subdomain
-                
-    return {"trackers": found_trackers, "total": len(found_trackers)}
 
 
 @app.post("/analyze-dark-patterns")

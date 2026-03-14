@@ -475,7 +475,7 @@
     .pattern-tag { font-family:'Share Tech Mono',monospace; padding:0.1rem 0.4rem; font-size:0.55rem; background:rgba(255,0,60,.1); border:1px solid rgba(255,0,60,.2); color:#FF4466; }
     .full-shame-list { display:flex; flex-direction:column; gap:0.05rem; background:var(--border); }
     .shame-row {
-      display:grid; grid-template-columns:2fr 1fr 1fr 2fr 1fr;
+      display:grid; grid-template-columns:2fr 0.9fr 2fr 1.2fr 1.8fr;
       align-items:center; gap:1.25rem; padding:0.6rem 1.125rem;
       background:var(--card); border-left:2px solid transparent;
       opacity:0; transform:translateX(-1rem);
@@ -490,6 +490,9 @@
     .shame-patterns { display:flex; flex-wrap:wrap; gap:0.15rem; }
     .shame-pattern-tag { font-family:'Share Tech Mono',monospace; padding:0.1rem 0.35rem; font-size:0.55rem; background:rgba(255,0,60,.09); border:1px solid rgba(255,0,60,.2); color:#FF4466; }
     .shame-date { font-family:'Share Tech Mono',monospace; font-size:0.55rem; color:#8A9BB0; text-align:right; }
+    .shame-tx { font-family:'Share Tech Mono',monospace; font-size:0.55rem; color:#8A9BB0; text-align:left; overflow-wrap:anywhere; }
+    .shame-tx a { color:var(--yellow); text-decoration:none; }
+    .shame-tx a:hover { text-decoration:underline; }
     .shame-disclaimer { margin-top:1rem; padding:0.7rem 1.125rem; background:rgba(255,0,60,.03); border:1px solid rgba(255,0,60,.1); border-left:2px solid rgba(255,0,60,.35); }
     .shame-disclaimer p { font-family:'Share Tech Mono',monospace; font-size:0.55rem; color:#8A9BB0; line-height:1.9; letter-spacing:.03em; }
 
@@ -728,12 +731,12 @@
       <div class="top-five-grid" id="top-five-grid"></div>
       <div class="cp-card" style="border-color:rgba(255,0,60,.1)">
         <div class="tracker-card-inner">
-          <div class="tracker-head" style="grid-template-columns:2fr 1fr 1fr 2fr 1fr; padding-left:1.125rem; padding-right:1.125rem">
+          <div class="tracker-head" style="grid-template-columns:2fr 0.9fr 2fr 1.2fr 1.8fr; padding-left:1.125rem; padding-right:1.125rem">
             <div class="tracker-head-cell">Website</div>
             <div class="tracker-head-cell">Risk Score</div>
-            <div class="tracker-head-cell">Reports</div>
             <div class="tracker-head-cell">Dark Patterns</div>
-            <div class="tracker-head-cell">Last Reported</div>
+            <div class="tracker-head-cell">Timestamp</div>
+            <div class="tracker-head-cell">Tx / Contract</div>
           </div>
           <div class="full-shame-list" id="full-shame-list"></div>
         </div>

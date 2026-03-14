@@ -100,11 +100,17 @@ function mergeStoredAnalysis(domain, patch) {
 // Backend relay (optional — gracefully skips if not available)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const BACKEND_URL = 'http://localhost:8000';
+const BACKEND_URLS = [
+  'http://127.0.0.1:8012',
+  'http://localhost:8012',
+  'http://127.0.0.1:8000',
+  'http://localhost:8000',
+];
 const EXTENSION_ENABLED_KEY = 'consumershield_enabled';
 const tabTraffic = new Map();
 const auditTimers = new Map();
 let extensionEnabled = true;
+let healthyBackendBase = null;
 
 chrome.storage.local.get([EXTENSION_ENABLED_KEY], (result) => {
   if (typeof result[EXTENSION_ENABLED_KEY] === 'boolean') {
@@ -128,51 +134,173 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 async function sendToBackend(analysis) {
+  const savePayload = buildReportSavePayload(analysis);
+
   try {
-    const response = await fetch(`${BACKEND_URL}/analyze-complete`, {
+    const backendResult = await fetchBackendJson('/analyze-complete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: {
         url: analysis.url,
         privacy_data: analysis.privacy,
         manipulation_data: analysis.manipulation,
-      }),
-      signal: AbortSignal.timeout(5000),
+      },
+      // Anchoring and AI analysis can take >5s.
+      timeoutMs: 30000,
     });
-    if (response.ok) {
-      const backendResult = await response.json();
-      // Merge AI insight and regulatory violations from backend
-      const domain = normalizeDomain(analysis.url);
-      const backendOverallRisk = Number(backendResult.overall_risk);
-      mergeStoredAnalysis(domain, {
-        aiInsight: backendResult.combined_insight,
-        regulatoryViolations: backendResult.regulatory_violations,
-        backendOverallRisk: Number.isFinite(backendOverallRisk) ? backendOverallRisk : undefined,
-        backendAnalyzed: true,
+
+    // Merge AI insight and regulatory violations from backend
+    const domain = normalizeDomain(analysis.url);
+    mergeStoredAnalysis(domain, {
+      aiInsight: backendResult.combined_insight,
+      regulatoryViolations: backendResult.regulatory_violations,
+      backendAnalyzed: true,
+    });
+  } catch (error) {
+    // If deep analysis fails, still persist the report for wall-of-shame and audit history.
+    if (!savePayload) return;
+
+    try {
+      await fetchBackendJson('/reports/save', {
+        method: 'POST',
+        body: savePayload,
+        timeoutMs: 12000,
+      });
+    } catch (saveError) {
+      console.warn('[ConsumerShield] Unable to persist report to backend', {
+        analyzeError: String(error),
+        saveError: String(saveError),
       });
     }
-  } catch {
-    // Backend not running — silently skip
   }
+}
+
+function normalizeRiskScore(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.min(10, Number(parsed.toFixed(1))));
+}
+
+function buildReportSavePayload(analysis) {
+  if (!analysis || typeof analysis !== 'object') return null;
+
+  const url = String(analysis.url || '').trim();
+  if (!url) return null;
+
+  const privacyRisk = normalizeRiskScore(
+    analysis?.privacy?.riskScore ?? analysis?.overall?.privacyRisk
+  );
+  const manipulationRisk = normalizeRiskScore(
+    analysis?.manipulation?.riskScore ?? analysis?.overall?.manipulationRisk
+  );
+  const overallRisk = normalizeRiskScore(
+    analysis?.overall?.riskScore ?? Math.max(privacyRisk, manipulationRisk)
+  );
+
+  const patterns = Array.isArray(analysis?.manipulation?.patterns)
+    ? analysis.manipulation.patterns
+    : [];
+  const patternNames = [...new Set(
+    patterns
+      .map((pattern) => String(pattern?.name || pattern?.type || '').trim())
+      .filter(Boolean)
+  )];
+
+  const trackerCount = Array.isArray(analysis?.privacy?.trackers)
+    ? analysis.privacy.trackers.length
+    : 0;
+
+  return {
+    url,
+    domain: String(analysis.domain || normalizeDomain(url) || '').trim() || null,
+    privacy_risk: privacyRisk,
+    manipulation_risk: manipulationRisk,
+    overall_risk: overallRisk,
+    pattern_names: patternNames,
+    tracker_count: trackerCount,
+    combined_insight: String(analysis.aiInsight || analysis?.overall?.insight || '').trim() || null,
+    anchor_on_save: true,
+  };
+}
+
+async function fetchBackendJson(path, { method = 'GET', body = null, timeoutMs = 5000 } = {}) {
+  const candidates = healthyBackendBase
+    ? [healthyBackendBase, ...BACKEND_URLS.filter((url) => url !== healthyBackendBase)]
+    : [...BACKEND_URLS];
+
+  let lastError = null;
+  for (const baseUrl of candidates) {
+    try {
+      const requestInit = {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      };
+
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' && timeoutMs > 0) {
+        requestInit.signal = AbortSignal.timeout(timeoutMs);
+      }
+
+      const response = await fetch(`${baseUrl}${path}`, requestInit);
+
+      if (!response.ok) {
+        throw new Error(`Request failed (${response.status})`);
+      }
+
+      healthyBackendBase = baseUrl;
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('Unable to reach backend API');
 }
 
 async function fetchDomainIntelligence(detectedDomains, currentTabDomain) {
   try {
-    const response = await fetch(`${BACKEND_URL}/analyze-domains`, {
+    return await fetchBackendJson('/analyze-domains', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: {
         domains: detectedDomains,
         first_party_domain: currentTabDomain,
-      }),
-      signal: AbortSignal.timeout(5000),
+      },
+      timeoutMs: 7000,
     });
-
-    if (!response.ok) return null;
-    return await response.json();
   } catch {
     return null;
   }
+}
+
+function mapDomainIntelligenceToTrackers(domainIntelligence, fallbackDomains = []) {
+  if (Array.isArray(domainIntelligence?.trackers)) {
+    return domainIntelligence.trackers;
+  }
+
+  const resolved = Array.isArray(domainIntelligence?.resolved_trackers)
+    ? domainIntelligence.resolved_trackers
+    : [];
+
+  const mapped = resolved
+    .map((item) => {
+      const domain = normalizeDomain(item?.domain || '');
+      if (!domain) return null;
+
+      const categories = Array.isArray(item?.categories) ? item.categories : [];
+      const type = String(categories[0] || 'tracker').trim().toLowerCase() || 'tracker';
+      const name = String(item?.entity || item?.matched_domain || domain).trim() || domain;
+
+      return { domain, type, name };
+    })
+    .filter(Boolean);
+
+  if (mapped.length) {
+    return mapped;
+  }
+
+  return (Array.isArray(fallbackDomains) ? fallbackDomains : [])
+    .map((d) => normalizeDomain(d))
+    .filter(Boolean)
+    .map((d) => ({ domain: d, type: 'unknown', name: d.split('.')[0] || d }));
 }
 
 function getOrCreateTrafficState(tabId, firstPartyDomain = '') {
@@ -315,41 +443,24 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       : fallbackDetectedDomains;
     const currentTabDomain = trafficState?.firstPartyDomain || domain;
 
-    // Call backend to resolve detected domains into tracker entities.
-    const domainsToAnalyze = detectedDomains;
+    // Resolve domains into tracker entities using the backend schema.
+    const domainsToAnalyze = (Array.isArray(data.privacy?.detectedDomains) && data.privacy.detectedDomains.length)
+      ? data.privacy.detectedDomains
+      : detectedDomains;
     
     // Default trackers if backend is unavailable
     let resolvedTrackers = [];
     
-    fetch(`${BACKEND_URL}/analyze-domains`, {
+    fetchBackendJson('/analyze-domains', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: {
         domains: domainsToAnalyze,
         first_party_domain: currentTabDomain,
-      }),
-      signal: AbortSignal.timeout(2000), // Reduced from 3000
+      },
+      timeoutMs: 7000,
     })
-    .then(res => res.json())
     .then(backendData => {
-      const resolved = Array.isArray(backendData?.resolved_trackers) ? backendData.resolved_trackers : [];
-      const suspicious = Array.isArray(backendData?.suspicious_domains) ? backendData.suspicious_domains : [];
-
-      const mappedResolved = resolved.map((item) => ({
-        domain: item.domain || item.matched_domain || '',
-        type: (Array.isArray(item.categories) && item.categories.length > 0)
-          ? String(item.categories[0]).toLowerCase()
-          : 'tracker',
-        name: item.entity || item.domain || 'Tracker',
-      }));
-
-      const mappedSuspicious = suspicious.map((item) => ({
-        domain: item.domain || '',
-        type: 'tracker',
-        name: item.domain || 'Suspicious domain',
-      }));
-
-      resolvedTrackers = [...mappedResolved, ...mappedSuspicious].filter((item) => item.domain);
+      resolvedTrackers = mapDomainIntelligenceToTrackers(backendData, domainsToAnalyze);
       finishAnalysis(resolvedTrackers);
     })
     .catch(err => {
@@ -366,7 +477,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const privacyRisk = calculatePrivacyRisk(data.privacy);
       const manipulationRisk = calculateManipulationRisk(data.manipulation);
       
-      // Overall score uses the stronger of privacy and manipulation risks.
+      // FORMULA: Use MAX of both risks
       const overallRisk = Math.max(privacyRisk, manipulationRisk);
       const overallLevel = getRiskLevel(overallRisk);
 
