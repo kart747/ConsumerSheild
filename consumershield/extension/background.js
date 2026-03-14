@@ -143,9 +143,11 @@ async function sendToBackend(analysis) {
       const backendResult = await response.json();
       // Merge AI insight and regulatory violations from backend
       const domain = normalizeDomain(analysis.url);
+      const backendOverallRisk = Number(backendResult.overall_risk);
       mergeStoredAnalysis(domain, {
         aiInsight: backendResult.combined_insight,
         regulatoryViolations: backendResult.regulatory_violations,
+        backendOverallRisk: Number.isFinite(backendOverallRisk) ? backendOverallRisk : undefined,
         backendAnalyzed: true,
       });
     }
@@ -313,8 +315,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       : fallbackDetectedDomains;
     const currentTabDomain = trafficState?.firstPartyDomain || domain;
 
-    // Call backend to resolve detectedDomains into trackers
-    const domainsToAnalyze = data.privacy.detectedDomains || [];
+    // Call backend to resolve detected domains into tracker entities.
+    const domainsToAnalyze = detectedDomains;
     
     // Default trackers if backend is unavailable
     let resolvedTrackers = [];
@@ -322,12 +324,32 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     fetch(`${BACKEND_URL}/analyze-domains`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(domainsToAnalyze),
+      body: JSON.stringify({
+        domains: domainsToAnalyze,
+        first_party_domain: currentTabDomain,
+      }),
       signal: AbortSignal.timeout(2000), // Reduced from 3000
     })
     .then(res => res.json())
     .then(backendData => {
-      resolvedTrackers = backendData.trackers || [];
+      const resolved = Array.isArray(backendData?.resolved_trackers) ? backendData.resolved_trackers : [];
+      const suspicious = Array.isArray(backendData?.suspicious_domains) ? backendData.suspicious_domains : [];
+
+      const mappedResolved = resolved.map((item) => ({
+        domain: item.domain || item.matched_domain || '',
+        type: (Array.isArray(item.categories) && item.categories.length > 0)
+          ? String(item.categories[0]).toLowerCase()
+          : 'tracker',
+        name: item.entity || item.domain || 'Tracker',
+      }));
+
+      const mappedSuspicious = suspicious.map((item) => ({
+        domain: item.domain || '',
+        type: 'tracker',
+        name: item.domain || 'Suspicious domain',
+      }));
+
+      resolvedTrackers = [...mappedResolved, ...mappedSuspicious].filter((item) => item.domain);
       finishAnalysis(resolvedTrackers);
     })
     .catch(err => {
@@ -344,7 +366,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const privacyRisk = calculatePrivacyRisk(data.privacy);
       const manipulationRisk = calculateManipulationRisk(data.manipulation);
       
-      // FORMULA: Use MAX of both risks
+      // Overall score uses the stronger of privacy and manipulation risks.
       const overallRisk = Math.max(privacyRisk, manipulationRisk);
       const overallLevel = getRiskLevel(overallRisk);
 

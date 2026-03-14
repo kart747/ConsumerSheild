@@ -7,6 +7,7 @@ immutable proof transaction.
 """
 
 import json
+import hashlib
 import logging
 import os
 from typing import Any, Dict
@@ -18,10 +19,17 @@ logger = logging.getLogger("consumershield.ethereum")
 
 SEPOLIA_CHAIN_ID = 11155111
 
-# Minimal ABI for the EvidenceRegistry contract.
+# Minimal ABI variants for EvidenceRegistry deployments.
 EVIDENCE_REGISTRY_ABI = [
     {
         "inputs": [{"internalType": "bytes32", "name": "reportHash", "type": "bytes32"}],
+        "name": "storeHash",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "string", "name": "hash", "type": "string"}],
         "name": "storeHash",
         "outputs": [],
         "stateMutability": "nonpayable",
@@ -100,52 +108,72 @@ def _store_hash_string_on_chain(report_hash: str) -> str:
     account = web3.eth.account.from_key(private_key)
     wallet_address = account.address
 
-    # Convert hex string to bytes32 for the contract parameter
-    hash_bytes = bytes.fromhex(report_hash.lstrip("0x"))
+    # Convert hex string to bytes32 for the contract parameter.
+    normalized_hash = str(report_hash or "").strip().lower().removeprefix("0x")
+    if len(normalized_hash) != 64:
+        raise BlockchainAnchoringError("Report hash must be a 32-byte hex value")
+    hash_bytes = bytes.fromhex(normalized_hash)
 
-    tx_call = contract.functions.storeHash(hash_bytes)
-
-    # Preflight: simulate the transaction before broadcasting to catch
-    # contract-level rejections (e.g. duplicate) without spending gas.
+    tx_calls = []
+    # Try bytes32 signature first.
     try:
-        tx_call.call({"from": wallet_address})
-    except ContractLogicError as exc:
-        if _is_duplicate_report_error(exc):
-            raise DuplicateReportAnchoringError(
-                "Duplicate report already anchored on blockchain"
-            ) from exc
-        raise BlockchainAnchoringError(
-            f"Smart contract rejected report hash: {exc}"
-        ) from exc
-    except Exception as exc:
-        if _is_duplicate_report_error(exc):
-            raise DuplicateReportAnchoringError(
-                "Duplicate report already anchored on blockchain"
-            ) from exc
-        raise BlockchainAnchoringError(
-            f"Failed preflight contract call: {exc}"
-        ) from exc
+        tx_calls.append(contract.get_function_by_signature("storeHash(bytes32)")(hash_bytes))
+    except Exception:
+        pass
+    # Fallback for deployments that still use string hash payloads.
+    try:
+        tx_calls.append(contract.get_function_by_signature("storeHash(string)")("0x" + normalized_hash))
+    except Exception:
+        pass
 
-    transaction = tx_call.build_transaction(
-        {
-            "from": wallet_address,
-            "nonce": web3.eth.get_transaction_count(wallet_address),
-            "chainId": chain_id,
-            "gas": 200000,
-            "gasPrice": web3.eth.gas_price,
-        }
+    if not tx_calls:
+        raise BlockchainAnchoringError("No compatible storeHash function found in contract ABI")
+
+    last_error: Exception | None = None
+    for tx_call in tx_calls:
+        try:
+            # Preflight: simulate the transaction before broadcasting to catch
+            # contract-level rejections (e.g. duplicate) without spending gas.
+            tx_call.call({"from": wallet_address})
+
+            transaction = tx_call.build_transaction(
+                {
+                    "from": wallet_address,
+                    "nonce": web3.eth.get_transaction_count(wallet_address),
+                    "chainId": chain_id,
+                    "gas": 200000,
+                    "gasPrice": web3.eth.gas_price,
+                }
+            )
+
+            signed_txn = web3.eth.account.sign_transaction(transaction, private_key=private_key)
+            tx_hash = web3.eth.send_raw_transaction(signed_txn.raw_transaction)
+            receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=receipt_timeout)
+
+            if receipt.status != 1:
+                raise BlockchainAnchoringError("Ethereum transaction reverted")
+
+            tx_hash_hex = Web3.to_hex(tx_hash)
+            logger.info("Blockchain proof stored successfully. tx_hash=%s", tx_hash_hex)
+            return tx_hash_hex
+        except ContractLogicError as exc:
+            if _is_duplicate_report_error(exc):
+                raise DuplicateReportAnchoringError(
+                    "Duplicate report already anchored on blockchain"
+                ) from exc
+            last_error = exc
+            continue
+        except Exception as exc:
+            if _is_duplicate_report_error(exc):
+                raise DuplicateReportAnchoringError(
+                    "Duplicate report already anchored on blockchain"
+                ) from exc
+            last_error = exc
+            continue
+
+    raise BlockchainAnchoringError(
+        f"Smart contract rejected report hash: {last_error}"
     )
-
-    signed_txn = web3.eth.account.sign_transaction(transaction, private_key=private_key)
-    tx_hash = web3.eth.send_raw_transaction(signed_txn.raw_transaction)
-    receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=receipt_timeout)
-
-    if receipt.status != 1:
-        raise BlockchainAnchoringError("Ethereum transaction reverted")
-
-    tx_hash_hex = Web3.to_hex(tx_hash)
-    logger.info("Blockchain proof stored successfully. tx_hash=%s", tx_hash_hex)
-    return tx_hash_hex
 
 
 def store_report_hash_on_chain(report_data: dict) -> str:
@@ -190,7 +218,7 @@ def store_precomputed_hash_on_chain(report_hash: str) -> str:
 
 
 def get_stored_hash_from_tx(tx_hash: str) -> str:
-    """Decode `storeHash(string)` calldata and return the stored hash string."""
+    """Decode `storeHash(bytes32)` calldata and return the stored hash string."""
     if not tx_hash or not str(tx_hash).strip():
         raise BlockchainAnchoringError("Missing transaction hash for verification")
 
@@ -226,16 +254,31 @@ def get_stored_hash_from_tx(tx_hash: str) -> str:
     if getattr(function_obj, "fn_name", "") != "storeHash":
         raise BlockchainAnchoringError("Transaction is not a storeHash call")
 
-    on_chain_hash = str(params.get("hash") or "").strip()
-    if not on_chain_hash:
+    raw_hash = params.get("reportHash")
+    if raw_hash is None:
+        raw_hash = params.get("hash")
+
+    if raw_hash is None:
         raise BlockchainAnchoringError("Decoded transaction does not contain a hash value")
 
+    if isinstance(raw_hash, (bytes, bytearray)):
+        return "0x" + bytes(raw_hash).hex()
+
+    on_chain_hash = str(raw_hash).strip()
+    if not on_chain_hash:
+        raise BlockchainAnchoringError("Decoded transaction does not contain a hash value")
+    if not on_chain_hash.startswith("0x"):
+        on_chain_hash = "0x" + on_chain_hash.lower().removeprefix("0x")
     return on_chain_hash
+
+
+def _normalize_hash(value: str) -> str:
+    return str(value or "").strip().lower().removeprefix("0x")
 
 
 def verify_report_hash_on_chain(tx_hash: str, expected_hash: str) -> Dict[str, Any]:
     """Cross-check DB hash against the hash committed in Ethereum transaction calldata."""
-    normalized_expected = str(expected_hash or "").strip().lower()
+    normalized_expected = _normalize_hash(expected_hash)
     if not normalized_expected:
         return {
             "verified": False,
@@ -246,7 +289,7 @@ def verify_report_hash_on_chain(tx_hash: str, expected_hash: str) -> Dict[str, A
 
     try:
         on_chain_hash = get_stored_hash_from_tx(tx_hash)
-        normalized_on_chain = on_chain_hash.lower()
+        normalized_on_chain = _normalize_hash(on_chain_hash)
         return {
             "verified": normalized_on_chain == normalized_expected,
             "on_chain_hash": on_chain_hash,

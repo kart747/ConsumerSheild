@@ -614,9 +614,14 @@ function setBadge(id, score, level) {
 }
 
 function getDisplayPrivacyScore(analysis) {
-  const score = Number(analysis.domain_analysis?.total_privacy_score);
-  if (Number.isFinite(score)) return score;
-  return Number(analysis.privacy?.riskScore || 0);
+  const domainScore = Number(analysis.domain_analysis?.total_privacy_score);
+  const localScore = Number(analysis.privacy?.riskScore || 0);
+
+  if (Number.isFinite(domainScore) && Number.isFinite(localScore)) {
+    return Math.max(domainScore, localScore);
+  }
+  if (Number.isFinite(domainScore)) return domainScore;
+  return Number.isFinite(localScore) ? localScore : 0;
 }
 
 function getNetworkDomainCount(analysis) {

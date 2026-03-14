@@ -54,6 +54,10 @@ from ethereum_anchor import (
     DuplicateReportAnchoringError,
 )
 
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(BACKEND_DIR)
+load_dotenv(os.path.join(BACKEND_DIR, ".env"))
+load_dotenv(os.path.join(REPO_DIR, ".env"))
 load_dotenv()
 
 # ── Gemini API setup (new google.genai SDK) ──────────────────
@@ -104,7 +108,7 @@ _GEMINI_MODEL_CANDIDATES = _load_model_candidates_from_env(MODELS_TO_TRY)
 _GEMINI_MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
 _GEMINI_GLOBAL_COOLDOWN_UNTIL: float = 0.0
 
-DARK_PATTERN_THRESHOLD = 7.0
+DARK_PATTERN_THRESHOLD = 6.0
 
 
 def _extract_retry_seconds_from_error(error_text: str) -> Optional[int]:
@@ -552,6 +556,8 @@ class StoredReportResponse(BaseModel):
     tx_hash: Optional[str] = None
     anchor_status: str
     anchor_error: Optional[str] = None
+    verification_status: str
+    verification_error: Optional[str] = None
     privacy_risk: float
     manipulation_risk: float
     overall_risk: float
@@ -567,6 +573,12 @@ class TriggerAnchorResponse(BaseModel):
     anchor_status: str
     tx_hash: Optional[str] = None
     detail: str
+
+
+class RetryAnchorsResponse(BaseModel):
+    queued: int
+    scanned: int
+    report_ids: List[str]
 
 
 class VerifyReportResponse(BaseModel):
@@ -1261,6 +1273,97 @@ def _normalize_detected_patterns(patterns: List[str]) -> List[str]:
     return sorted({str(item).strip() for item in patterns if str(item).strip()})
 
 
+def _normalize_hash_value(hash_value: str) -> str:
+    return str(hash_value or "").strip().lower().removeprefix("0x")
+
+
+def _hash_matches_expected(expected_hash: str, payload: Dict[str, Any]) -> tuple[bool, str]:
+    normalized_expected = _normalize_hash_value(expected_hash)
+    if not normalized_expected:
+        return False, ""
+
+    recomputed_keccak = build_report_keccak(payload)
+    recomputed_sha256 = build_report_sha256(payload)
+    normalized_keccak = _normalize_hash_value(recomputed_keccak)
+    normalized_sha256 = _normalize_hash_value(recomputed_sha256)
+
+    if normalized_expected == normalized_keccak:
+        return True, recomputed_keccak
+    if normalized_expected == normalized_sha256:
+        return True, recomputed_sha256
+
+    return False, recomputed_keccak
+
+
+async def _evaluate_report_verification(row: ReportRecord) -> Dict[str, Any]:
+    expected_hash = str(row.report_hash or "").strip()
+    canonical_payload = _parse_canonical_payload_json(row.canonical_payload)
+    db_hash_matches, recomputed_hash = _hash_matches_expected(expected_hash, canonical_payload)
+
+    if not row.tx_hash:
+        if not db_hash_matches:
+            status = "tampered"
+            message = "Report content hash mismatch in database"
+        elif row.anchor_status == "not_requested":
+            status = "not_requested"
+            message = "Ethereum anchoring was not requested for this report"
+        elif row.anchor_status == "not_required":
+            status = "not_required"
+            message = "Risk score did not cross blockchain threshold"
+        else:
+            status = "pending"
+            message = "No Ethereum transaction found yet"
+
+        return {
+            "report_id": row.report_id,
+            "status": status,
+            "verified": False,
+            "db_hash_matches": db_hash_matches,
+            "expected_hash": expected_hash,
+            "recomputed_hash": recomputed_hash,
+            "on_chain_hash": None,
+            "tx_hash": None,
+            "error": message,
+        }
+
+    chain_check = await asyncio.to_thread(verify_report_hash_on_chain, row.tx_hash, expected_hash)
+    on_chain_hash = chain_check.get("on_chain_hash")
+    chain_verified = bool(chain_check.get("verified"))
+    verified = db_hash_matches and chain_verified
+
+    if verified:
+        status = "verified"
+    elif chain_check.get("error"):
+        status = "verification_error"
+    else:
+        status = "tampered"
+
+    return {
+        "report_id": row.report_id,
+        "status": status,
+        "verified": verified,
+        "db_hash_matches": db_hash_matches,
+        "expected_hash": expected_hash,
+        "recomputed_hash": recomputed_hash,
+        "on_chain_hash": on_chain_hash,
+        "tx_hash": row.tx_hash,
+        "error": chain_check.get("error"),
+    }
+
+
+def _persist_verification_result(db: Session, row: ReportRecord, verification: Dict[str, Any]) -> None:
+    status = str(verification.get("status") or "not_verified")
+    row.verification_status = status
+    row.verification_error = verification.get("error")
+    row.verified_at = datetime.utcnow() if status == "verified" else None
+    db.commit()
+    db.refresh(row)
+
+
+def _run_verify_sync(row: ReportRecord) -> Dict[str, Any]:
+    return asyncio.run(_evaluate_report_verification(row))
+
+
 def _build_stable_report_payload(url: str, detected_patterns: List[str], details: str, risk_score: float) -> Dict[str, Any]:
     # Timestamp intentionally excluded to keep hash deterministic across retries.
     return {
@@ -1318,7 +1421,7 @@ def _effective_anchor_risk(report: ReportRecord) -> float:
 
 
 def _meets_anchor_threshold(report: ReportRecord) -> bool:
-    return _effective_anchor_risk(report) >= DARK_PATTERN_THRESHOLD
+    return _effective_anchor_risk(report) > DARK_PATTERN_THRESHOLD
 
 
 def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
@@ -1328,11 +1431,24 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
     if not _meets_anchor_threshold(report):
         report.anchor_status = "not_required"
         report.anchor_error = None
+        report.verification_status = "not_required"
+        report.verification_error = None
+        report.verified_at = None
         db.commit()
         db.refresh(report)
         return report
 
     if bool(report.blockchain_proof):
+        if report.verification_status != "verified":
+            try:
+                verification = _run_verify_sync(report)
+                _persist_verification_result(db, report, verification)
+            except Exception as exc:
+                report.verification_status = "verification_error"
+                report.verification_error = str(exc)
+                report.verified_at = None
+                db.commit()
+                db.refresh(report)
         return report
 
     report_hash = str(report.report_hash or "").strip()
@@ -1359,8 +1475,21 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
         report.tx_hash = duplicate.blockchain_tx_hash
         report.anchor_status = "anchored"
         report.anchor_error = "duplicate_hash_reused"
+        report.verification_status = "pending"
+        report.verification_error = None
+        report.verified_at = None
         db.commit()
         db.refresh(report)
+
+        try:
+            verification = _run_verify_sync(report)
+            _persist_verification_result(db, report, verification)
+        except Exception as exc:
+            report.verification_status = "verification_error"
+            report.verification_error = str(exc)
+            report.verified_at = None
+            db.commit()
+            db.refresh(report)
         return report
 
     try:
@@ -1370,20 +1499,41 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
         report.tx_hash = tx_hash
         report.anchor_status = "anchored"
         report.anchor_error = None
+        report.verification_status = "pending"
+        report.verification_error = None
+        report.verified_at = None
     except DuplicateReportAnchoringError:
         # Hash already on-chain from a prior transaction — treat as anchored.
         report.blockchain_proof = True
         report.anchor_status = "anchored"
         report.anchor_error = "duplicate_already_on_chain"
+        report.verification_status = "pending"
+        report.verification_error = None
+        report.verified_at = None
     except Exception as exc:
         report.blockchain_proof = False
         report.blockchain_tx_hash = None
         report.tx_hash = None
         report.anchor_status = "failed"
         report.anchor_error = str(exc)
+        report.verification_status = "verification_error"
+        report.verification_error = str(exc)
+        report.verified_at = None
 
     db.commit()
     db.refresh(report)
+
+    if report.anchor_status == "anchored" and report.tx_hash:
+        try:
+            verification = _run_verify_sync(report)
+            _persist_verification_result(db, report, verification)
+        except Exception as exc:
+            report.verification_status = "verification_error"
+            report.verification_error = str(exc)
+            report.verified_at = None
+            db.commit()
+            db.refresh(report)
+
     return report
 
 
@@ -1426,7 +1576,7 @@ def _save_generated_report(
         return _anchor_report_if_needed(db, duplicate)
 
     now = datetime.utcnow()
-    anchor_status = "pending" if max(float(risk_score or 0.0), float(manipulation_risk or 0.0)) >= DARK_PATTERN_THRESHOLD else "not_required"
+    anchor_status = "pending" if max(float(risk_score or 0.0), float(manipulation_risk or 0.0)) > DARK_PATTERN_THRESHOLD else "not_required"
 
     record = ReportRecord(
         report_id=str(uuid.uuid4()),
@@ -1443,6 +1593,9 @@ def _save_generated_report(
         tx_hash=None,
         anchor_status=anchor_status,
         anchor_error=None,
+        verification_status=("pending" if anchor_status == "pending" else "not_required"),
+        verification_error=None,
+        verified_at=None,
         privacy_risk=privacy_risk_value,
         manipulation_risk=manipulation_risk_value,
         overall_risk=overall_risk_value,
@@ -1480,6 +1633,8 @@ def _stored_report_to_response(record: ReportRecord) -> StoredReportResponse:
         tx_hash=record.tx_hash,
         anchor_status=record.anchor_status,
         anchor_error=record.anchor_error,
+        verification_status=record.verification_status,
+        verification_error=record.verification_error,
         privacy_risk=record.privacy_risk,
         manipulation_risk=record.manipulation_risk,
         overall_risk=record.overall_risk,
@@ -1505,6 +1660,9 @@ def _anchor_report_worker(report_id: str) -> None:
         if report:
             report.anchor_status = "failed"
             report.anchor_error = str(exc)
+            report.verification_status = "verification_error"
+            report.verification_error = str(exc)
+            report.verified_at = None
             db.commit()
     finally:
         db.close()
@@ -1612,7 +1770,7 @@ async def save_report(
         combined_insight=req.combined_insight or "",
     )
     canonical_json = canonical_payload_to_json(canonical_payload)
-    report_hash = build_report_sha256(canonical_payload)
+    report_hash = build_report_keccak(canonical_payload)
     pattern_names_json = encode_pattern_names(normalized_patterns)
     privacy_risk_value = round(float(req.privacy_risk), 2)
     manipulation_risk_value = round(float(req.manipulation_risk), 2)
@@ -1633,6 +1791,9 @@ async def save_report(
         if req.anchor_on_save and _meets_anchor_threshold(duplicate) and duplicate.anchor_status not in {"anchored", "pending"}:
             duplicate.anchor_status = "pending"
             duplicate.anchor_error = None
+            duplicate.verification_status = "pending"
+            duplicate.verification_error = None
+            duplicate.verified_at = None
             db.commit()
             db.refresh(duplicate)
             background_tasks.add_task(_anchor_report_worker, duplicate.report_id)
@@ -1653,10 +1814,17 @@ async def save_report(
         tx_hash=None,
         anchor_status=(
             "pending"
-            if req.anchor_on_save and max(float(req.overall_risk), float(req.manipulation_risk)) >= DARK_PATTERN_THRESHOLD
+            if req.anchor_on_save and max(float(req.overall_risk), float(req.manipulation_risk)) > DARK_PATTERN_THRESHOLD
             else ("not_required" if req.anchor_on_save else "not_requested")
         ),
         anchor_error=None,
+        verification_status=(
+            "pending"
+            if req.anchor_on_save and max(float(req.overall_risk), float(req.manipulation_risk)) > DARK_PATTERN_THRESHOLD
+            else ("not_required" if req.anchor_on_save else "not_requested")
+        ),
+        verification_error=None,
+        verified_at=None,
         privacy_risk=privacy_risk_value,
         manipulation_risk=manipulation_risk_value,
         overall_risk=overall_risk_value,
@@ -1735,63 +1903,60 @@ def trigger_report_anchor(
     )
 
 
+@app.post("/reports/retry-failed-anchors", response_model=RetryAnchorsResponse)
+def retry_failed_anchors(
+    limit: int = 100,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+):
+    safe_limit = min(max(limit, 1), 500)
+    candidates = (
+        db.query(ReportRecord)
+        .filter(ReportRecord.anchor_status.in_(["failed", "pending"]))
+        .order_by(ReportRecord.created_at.desc())
+        .limit(safe_limit)
+        .all()
+    )
+
+    queued_ids: List[str] = []
+    for row in candidates:
+        if not _meets_anchor_threshold(row):
+            row.anchor_status = "not_required"
+            row.anchor_error = None
+            row.verification_status = "not_required"
+            row.verification_error = None
+            row.verified_at = None
+            continue
+
+        row.anchor_status = "pending"
+        row.anchor_error = None
+        row.verification_status = "pending"
+        row.verification_error = None
+        row.verified_at = None
+        queued_ids.append(row.report_id)
+
+    db.commit()
+
+    if background_tasks is not None:
+        for report_id in queued_ids:
+            background_tasks.add_task(_anchor_report_worker, report_id)
+
+    return RetryAnchorsResponse(
+        queued=len(queued_ids),
+        scanned=len(candidates),
+        report_ids=queued_ids,
+    )
+
+
 @app.get("/reports/{report_id}/verify", response_model=VerifyReportResponse)
 async def verify_report_integrity(report_id: str, db: Session = Depends(get_db)):
     row = db.query(ReportRecord).filter(ReportRecord.report_id == report_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Report not found")
 
-    expected_hash = str(row.report_hash or "").strip()
-    canonical_payload = _parse_canonical_payload_json(row.canonical_payload)
-    recomputed_hash = build_report_sha256(canonical_payload)
-    db_hash_matches = bool(expected_hash) and recomputed_hash.lower() == expected_hash.lower()
-
-    if not row.tx_hash:
-        if not db_hash_matches:
-            status = "tampered"
-            message = "Report content hash mismatch in database"
-        elif row.anchor_status == "not_requested":
-            status = "not_requested"
-            message = "Ethereum anchoring was not requested for this report"
-        else:
-            status = "pending"
-            message = "No Ethereum transaction found yet"
-
-        return VerifyReportResponse(
-            report_id=row.report_id,
-            status=status,
-            verified=False,
-            db_hash_matches=db_hash_matches,
-            expected_hash=expected_hash,
-            recomputed_hash=recomputed_hash,
-            on_chain_hash=None,
-            tx_hash=None,
-            error=message,
-        )
-
-    chain_check = await asyncio.to_thread(verify_report_hash_on_chain, row.tx_hash, expected_hash)
-    on_chain_hash = chain_check.get("on_chain_hash")
-    chain_verified = bool(chain_check.get("verified"))
-    verified = db_hash_matches and chain_verified
-
-    if verified:
-        status = "verified"
-    elif chain_check.get("error"):
-        status = "verification_error"
-    else:
-        status = "tampered"
-
-    return VerifyReportResponse(
-        report_id=row.report_id,
-        status=status,
-        verified=verified,
-        db_hash_matches=db_hash_matches,
-        expected_hash=expected_hash,
-        recomputed_hash=recomputed_hash,
-        on_chain_hash=on_chain_hash,
-        tx_hash=row.tx_hash,
-        error=chain_check.get("error"),
-    )
+    verification = await _evaluate_report_verification(row)
+    _persist_verification_result(db, row, verification)
+    return VerifyReportResponse(**verification)
 
 
 @app.get("/wall-of-shame", response_model=List[WallOfShameItem])
@@ -1799,7 +1964,11 @@ def wall_of_shame(limit: int = 50, db: Session = Depends(get_db)):
     safe_limit = min(max(limit, 1), 200)
     rows = (
         db.query(ReportRecord)
-        .filter(ReportRecord.risk_score >= DARK_PATTERN_THRESHOLD)
+        .filter(
+            ReportRecord.risk_score > DARK_PATTERN_THRESHOLD,
+            ReportRecord.anchor_status == "anchored",
+            ReportRecord.verification_status == "verified",
+        )
         .order_by(ReportRecord.risk_score.desc(), ReportRecord.timestamp.desc())
         .limit(safe_limit)
         .all()

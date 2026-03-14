@@ -37,6 +37,8 @@ let REPORT = {
   ],
 };
 
+const BACKEND_URL = 'http://localhost:8000';
+
 function formatReportTimestamp(timestampMs) {
   const dt = Number(timestampMs) > 0 ? new Date(Number(timestampMs)) : new Date();
   const yyyy = dt.getFullYear();
@@ -111,9 +113,33 @@ function toReportShape(analysis) {
       })
     : [];
 
-  const securityScoreRaw = Number(overall.riskScore);
-  const fallbackRisk = Math.max(Number(privacy.riskScore || 0), Number(manipulation.riskScore || 0));
-  const securityScore = Number.isFinite(securityScoreRaw) ? securityScoreRaw : fallbackRisk;
+  const privacyScore = Number(privacy.riskScore);
+  const manipulationScore = Number(manipulation.riskScore);
+  const localMaxRisk = Math.max(
+    Number.isFinite(privacyScore) ? privacyScore : 0,
+    Number.isFinite(manipulationScore) ? manipulationScore : 0,
+  );
+
+  const fallbackOverallCandidates = [
+    analysis.overall?.riskScore,
+    analysis.securityScore,
+    analysis.backendOverallRisk,
+    analysis.backend_overall_risk,
+    analysis.overall_risk,
+    analysis.overallRisk,
+    overall.riskScore,
+  ];
+
+  let securityScore = Number.isFinite(localMaxRisk) ? localMaxRisk : NaN;
+  if (!Number.isFinite(securityScore) || securityScore === 0) {
+    for (const candidate of fallbackOverallCandidates) {
+      const value = Number(candidate);
+      if (Number.isFinite(value)) {
+        securityScore = value;
+        break;
+      }
+    }
+  }
 
   return {
     ...REPORT,
@@ -139,6 +165,112 @@ async function hydrateReportFromStorage() {
   const mapped = toReportShape(storedAnalysis);
   if (mapped) {
     REPORT = mapped;
+  }
+}
+
+function toDomainLabel(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return 'unknown-site';
+  try {
+    return new URL(value).hostname.replace(/^www\./, '');
+  } catch {
+    return value.replace(/^www\./, '').split('/')[0] || 'unknown-site';
+  }
+}
+
+function toDateOnly(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return new Date().toISOString().slice(0, 10);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function weekKey(value) {
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return '';
+  const year = dt.getUTCFullYear();
+  const start = Date.UTC(year, 0, 1);
+  const dayOfYear = Math.floor((Date.UTC(year, dt.getUTCMonth(), dt.getUTCDate()) - start) / 86400000) + 1;
+  const week = Math.ceil(dayOfYear / 7);
+  return `${year}-W${String(week).padStart(2, '0')}`;
+}
+
+function normalizeRiskScore(value) {
+  const score = Number(value || 0);
+  if (!Number.isFinite(score)) return 0;
+  if (score <= 10) return Math.round(score * 10);
+  return Math.round(score);
+}
+
+function aggregateWallOfShameRows(rows) {
+  const currentWeek = weekKey(new Date().toISOString());
+  const byDomain = new Map();
+
+  rows.forEach((row) => {
+    const domain = toDomainLabel(row?.url);
+    const timestamp = row?.timestamp || new Date().toISOString();
+    const patterns = Array.isArray(row?.detected_patterns) ? row.detected_patterns : [];
+    const riskScore = normalizeRiskScore(row?.risk_score);
+
+    if (!byDomain.has(domain)) {
+      byDomain.set(domain, {
+        url: domain,
+        riskScore,
+        reportsThisWeek: 0,
+        darkPatterns: new Set(),
+        lastReported: toDateOnly(timestamp),
+        _lastReportedTs: Date.parse(timestamp) || Date.now(),
+      });
+    }
+
+    const bucket = byDomain.get(domain);
+    bucket.riskScore = Math.max(bucket.riskScore, riskScore);
+
+    if (weekKey(timestamp) === currentWeek) {
+      bucket.reportsThisWeek += 1;
+    }
+
+    patterns.forEach((pattern) => {
+      const name = String(pattern || '').trim();
+      if (name) bucket.darkPatterns.add(name);
+    });
+
+    const tsValue = Date.parse(timestamp);
+    if (Number.isFinite(tsValue) && tsValue >= bucket._lastReportedTs) {
+      bucket._lastReportedTs = tsValue;
+      bucket.lastReported = toDateOnly(timestamp);
+    }
+  });
+
+  return Array.from(byDomain.values())
+    .map((item) => ({
+      url: item.url,
+      riskScore: item.riskScore,
+      reportsThisWeek: item.reportsThisWeek,
+      darkPatterns: Array.from(item.darkPatterns).slice(0, 6),
+      lastReported: item.lastReported,
+    }))
+    .sort((a, b) => (b.riskScore - a.riskScore) || (b.reportsThisWeek - a.reportsThisWeek));
+}
+
+async function hydrateHallOfShameFromBackend() {
+  try {
+    const response = await fetch(`${BACKEND_URL}/wall-of-shame?limit=200`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(6000),
+    });
+
+    if (!response.ok) return;
+
+    const payload = await response.json();
+    if (!Array.isArray(payload)) return;
+
+    const aggregated = aggregateWallOfShameRows(payload);
+    REPORT = {
+      ...REPORT,
+      wallOfShame: aggregated,
+    };
+  } catch {
+    // Keep the baked fallback list when backend is unavailable.
   }
 }
 
@@ -288,6 +420,25 @@ function buildLegal() {
 
 function buildWallOfShame() {
   const grid = document.getElementById('top-five-grid');
+  const list = document.getElementById('full-shame-list');
+  if (!grid || !list) return;
+
+  grid.innerHTML = '';
+  list.innerHTML = '';
+
+  if (!Array.isArray(REPORT.wallOfShame) || REPORT.wallOfShame.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'shame-row';
+    empty.innerHTML = `
+      <div class="shame-url">No high-risk reports yet</div>
+      <div class="shame-score">0</div>
+      <div class="shame-reports">0</div>
+      <div class="shame-patterns"><span class="shame-pattern-tag">Awaiting scans</span></div>
+      <div class="shame-date">-</div>`;
+    list.appendChild(empty);
+    return;
+  }
+
   REPORT.wallOfShame.slice(0, 5).forEach((site, index) => {
     const card = document.createElement('div');
     card.className = 'top-five-card';
@@ -305,7 +456,6 @@ function buildWallOfShame() {
     grid.appendChild(card);
   });
 
-  const list = document.getElementById('full-shame-list');
   REPORT.wallOfShame.forEach((site, index) => {
     const row = document.createElement('div');
     row.className = 'shame-row';
@@ -468,6 +618,7 @@ function initRescan() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   await hydrateReportFromStorage();
+  await hydrateHallOfShameFromBackend();
   document.getElementById('meta-site').textContent = REPORT.site;
   document.getElementById('meta-time').textContent = REPORT.timestamp;
   buildStats();

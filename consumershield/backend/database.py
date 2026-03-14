@@ -49,6 +49,9 @@ class ReportRecord(Base):
     tx_hash = Column(String(80), nullable=True, index=True)
     anchor_status = Column(String(24), nullable=False, default="pending", index=True)
     anchor_error = Column(Text, nullable=True)
+    verification_status = Column(String(24), nullable=False, default="not_verified", index=True)
+    verification_error = Column(Text, nullable=True)
+    verified_at = Column(DateTime, nullable=True)
 
     privacy_risk = Column(Float, nullable=False, default=0.0)
     manipulation_risk = Column(Float, nullable=False, default=0.0)
@@ -77,6 +80,9 @@ def _ensure_reports_columns() -> None:
         "timestamp": "DATETIME",
         "blockchain_proof": "BOOLEAN DEFAULT 0",
         "blockchain_tx_hash": "TEXT",
+        "verification_status": "TEXT DEFAULT 'not_verified'",
+        "verification_error": "TEXT",
+        "verified_at": "DATETIME",
     }
 
     with engine.begin() as conn:
@@ -119,6 +125,16 @@ def _backfill_reports_defaults() -> None:
             "SET blockchain_proof = CASE "
             "  WHEN COALESCE(NULLIF(blockchain_tx_hash, ''), NULLIF(tx_hash, '')) IS NOT NULL THEN 1 "
             "  ELSE COALESCE(blockchain_proof, 0) "
+            "END"
+        ))
+        conn.execute(text(
+            "UPDATE reports "
+            "SET verification_status = CASE "
+            "  WHEN COALESCE(NULLIF(verification_status, ''), '') <> '' THEN verification_status "
+            "  WHEN anchor_status = 'anchored' THEN 'pending' "
+            "  WHEN anchor_status = 'not_required' THEN 'not_required' "
+            "  WHEN anchor_status = 'not_requested' THEN 'not_requested' "
+            "  ELSE 'not_verified' "
             "END"
         ))
 
