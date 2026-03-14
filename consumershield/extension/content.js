@@ -308,6 +308,7 @@
     fingerprinting: false,
     patterns: [],
     overlayElements: [],
+    patternTargetElements: [],
   };
 
   // Avoid re-running on dynamic pages
@@ -316,6 +317,16 @@
   let extensionEnabled = true;
   const EXTENSION_ENABLED_KEY = 'consumershield_enabled';
   const scheduledAnalysisTimers = new Set();
+  const PATTERN_TARGET_ATTR = 'data-cs-pattern-target-id';
+  const PATTERN_FOCUS_CLASS = 'cs-focus-target';
+  const PATTERN_FOCUS_OVERLAY_ID = 'cs-focus-overlay';
+  const PATTERN_FOCUS_PADDING_PX = 3;
+  const PATTERN_FOCUS_DURATION_MS = 5000;
+  let activeFocusOverlay = null;
+  let activeFocusTarget = null;
+  let activeFocusAnimationFrame = 0;
+  let activeFocusClearTimer = null;
+  let patternTargetSequence = 0;
 
   function isExtensionContextInvalidatedError(error) {
     return /extension context invalidated/i.test(String(error?.message || error || ''));
@@ -383,12 +394,22 @@
     state.overlayElements.forEach((el) => {
       if (!el) return;
       el.classList.remove('cs-overlay-privacy', 'cs-overlay-manipulation');
+      el.classList.remove(PATTERN_FOCUS_CLASS);
       if (el.dataset?.csTagged) {
         delete el.dataset.csTagged;
       }
       el.querySelectorAll('.cs-tooltip').forEach((tip) => tip.remove());
     });
+    state.patternTargetElements.forEach((el) => {
+      if (!el) return;
+      el.classList.remove(PATTERN_FOCUS_CLASS);
+      if (el.hasAttribute(PATTERN_TARGET_ATTR)) {
+        el.removeAttribute(PATTERN_TARGET_ATTR);
+      }
+    });
     state.overlayElements = [];
+    state.patternTargetElements = [];
+    clearPatternFocusOverlay();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1131,11 +1152,56 @@
       .cs-overlay-privacy:hover .cs-tooltip {
         display: block !important;
       }
+      .cs-focus-target {
+        outline: 3px solid #ef4444 !important;
+        outline-offset: 4px !important;
+        box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.18), 0 0 24px rgba(239, 68, 68, 0.45) !important;
+        animation: cs-focus-beacon 1.6s ease-in-out 2 !important;
+        scroll-margin-top: 96px !important;
+      }
+      .cs-focus-overlay {
+        position: absolute !important;
+        border: 3px solid #ef4444 !important;
+        border-radius: 10px !important;
+        box-shadow: 0 0 0 8px rgba(239, 68, 68, 0.18), 0 0 28px rgba(239, 68, 68, 0.5) !important;
+        z-index: 9999999 !important;
+        pointer-events: none !important;
+        animation: cs-focus-box-pulse 1.2s ease-in-out 2 !important;
+      }
+      .cs-focus-overlay-label {
+        position: absolute !important;
+        left: -1px !important;
+        top: -28px !important;
+        background: rgba(17, 17, 17, 0.96) !important;
+        color: #f8fafc !important;
+        border: 1px solid rgba(239, 68, 68, 0.85) !important;
+        border-radius: 8px !important;
+        font-size: 11px !important;
+        line-height: 1.1 !important;
+        padding: 5px 8px !important;
+        white-space: nowrap !important;
+        max-width: min(70vw, 420px) !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+      }
+      @keyframes cs-focus-beacon {
+        0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.42); }
+        60% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+      }
+      @keyframes cs-focus-box-pulse {
+        0% { transform: scale(0.995); opacity: 0.88; }
+        50% { transform: scale(1.004); opacity: 1; }
+        100% { transform: scale(1); opacity: 0.96; }
+      }
     `;
     document.head.appendChild(style);
   }
 
   function applyOverlay(el, type, label) {
+    // Keep privacy highlights, but skip manipulation overlays to avoid red boxes.
+    if (type === 'manipulation') return;
+
     const target = resolveOverlayTarget(el);
     if (!target || target.dataset?.csTagged) return;
     target.dataset.csTagged = '1';
@@ -1168,12 +1234,648 @@
 
   function resolveOverlayTarget(el) {
     if (!el) return null;
-    const voidLikeTags = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+
+    const nonRenderableTags = new Set(['area', 'base', 'br', 'col', 'head', 'html', 'link', 'meta', 'param', 'script', 'source', 'style', 'title', 'track', 'wbr']);
     const tag = String(el.tagName || '').toLowerCase();
-    if (voidLikeTags.has(tag)) {
+
+    if (nonRenderableTags.has(tag)) {
       return el.closest('label, div, section, article, form') || el.parentElement || null;
     }
+
+    const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+    if (rect && rect.width >= 2 && rect.height >= 2) {
+      return el;
+    }
+
+    // Fallback only for tiny/hidden wrappers where the clicked node is not paintable.
+    const parentCandidate = el.closest('button, a, label, input, img, div, section, article, form, li, p, span');
+    if (parentCandidate) return parentCandidate;
+
     return el;
+  }
+
+  function isGenericFocusContainer(el) {
+    if (!el) return true;
+    const tag = String(el.tagName || '').toLowerCase();
+    return tag === 'body' || tag === 'html';
+  }
+
+  function isUsableFocusTarget(el) {
+    if (!el || !el.isConnected) return false;
+    if (isGenericFocusContainer(el)) return false;
+    return el.offsetWidth > 0 && el.offsetHeight > 0;
+  }
+
+  function escapeCssToken(value) {
+    const token = String(value || '').trim();
+    if (!token) return '';
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+      return CSS.escape(token);
+    }
+    return token.replace(/([^a-zA-Z0-9_-])/g, '\\$1');
+  }
+
+  function buildStableElementSelector(target) {
+    if (!target || isGenericFocusContainer(target)) return '';
+
+    const segments = [];
+    let current = target;
+    let depth = 0;
+
+    while (current && current.nodeType === Node.ELEMENT_NODE && depth < 6) {
+      const tag = String(current.tagName || '').toLowerCase();
+      if (!tag || tag === 'html') break;
+
+      let segment = tag;
+      const domId = String(current.id || '').trim();
+      if (domId) {
+        segment += `#${escapeCssToken(domId)}`;
+        segments.unshift(segment);
+        break;
+      }
+
+      const classTokens = Array.from(current.classList || [])
+        .map((name) => String(name || '').trim())
+        .filter((name) => name.length >= 2 && name.length <= 40)
+        .slice(0, 2);
+      if (classTokens.length > 0) {
+        segment += `.${classTokens.map(escapeCssToken).join('.')}`;
+      }
+
+      const parent = current.parentElement;
+      if (parent) {
+        const sameTagSiblings = Array.from(parent.children)
+          .filter((child) => child.tagName === current.tagName);
+        if (sameTagSiblings.length > 1) {
+          segment += `:nth-of-type(${sameTagSiblings.indexOf(current) + 1})`;
+        }
+      }
+
+      segments.unshift(segment);
+      current = current.parentElement;
+      depth += 1;
+      if (current && String(current.tagName || '').toLowerCase() === 'body') {
+        segments.unshift('body');
+        break;
+      }
+    }
+
+    return segments.join(' > ').slice(0, 320);
+  }
+
+  function selectElementBySelector(selector) {
+    const candidateSelector = String(selector || '').trim();
+    if (!candidateSelector) return null;
+    try {
+      const match = document.querySelector(candidateSelector);
+      if (!isUsableFocusTarget(match)) return null;
+      return match;
+    } catch {
+      return null;
+    }
+  }
+
+  function getPatternCandidateText(el) {
+    return normalizeScanText(
+      el?.innerText
+      || el?.textContent
+      || el?.getAttribute?.('aria-label')
+      || el?.getAttribute?.('alt')
+      || el?.getAttribute?.('title')
+      || el?.getAttribute?.('value')
+      || '',
+    );
+  }
+
+  function buildXPathStringLiteral(value) {
+    const input = String(value || '');
+    if (!input.includes("'")) {
+      return `'${input}'`;
+    }
+    if (!input.includes('"')) {
+      return `"${input}"`;
+    }
+
+    const parts = input.split("'");
+    const tokens = [];
+    parts.forEach((part, index) => {
+      tokens.push(`'${part}'`);
+      if (index < parts.length - 1) {
+        tokens.push(`"'"`);
+      }
+    });
+
+    return `concat(${tokens.join(', ')})`;
+  }
+
+  function getElementDepth(el) {
+    let depth = 0;
+    let current = el;
+    while (current && depth < 160) {
+      depth += 1;
+      current = current.parentElement;
+    }
+    return depth;
+  }
+
+  function scoreFocusTextMatch(candidateText, searchText, tokens) {
+    const haystack = normalizeScanText(candidateText || '').toLowerCase();
+    if (!haystack) return 0;
+
+    const needle = String(searchText || '').trim().toLowerCase();
+    if (!needle) return 0;
+
+    if (haystack === needle) return 1;
+
+    let score = 0;
+    if (haystack.includes(needle)) {
+      score = 0.94;
+    } else if (needle.includes(haystack) && haystack.length >= Math.min(42, needle.length)) {
+      score = 0.76;
+    }
+
+    if (tokens.length > 0) {
+      let matched = 0;
+      tokens.forEach((token) => {
+        if (haystack.includes(token)) matched += 1;
+      });
+      const coverage = matched / tokens.length;
+      score = Math.max(score, coverage * 0.84);
+    }
+
+    if (haystack.length > 360) {
+      score -= 0.06;
+    }
+
+    return Math.max(0, Math.min(1, score));
+  }
+
+  function findReactElementByText(searchText) {
+    const normalizedSearch = normalizeScanText(searchText || '').toLowerCase().slice(0, 200);
+    if (!normalizedSearch || normalizedSearch.length < 3) return null;
+
+    const tokens = normalizedSearch
+      .split(/\s+/)
+      .map((token) => token.replace(/[^a-z0-9]/gi, '').toLowerCase())
+      .filter((token) => token.length >= 3)
+      .slice(0, 12);
+
+    let bestTarget = null;
+    let bestScore = 0;
+
+    const considerNode = (textNode) => {
+      const parent = textNode?.parentElement;
+      if (!parent) return;
+
+      const target = resolveOverlayTarget(parent);
+      if (!isUsableFocusTarget(target)) return;
+
+      const candidateText = getPatternCandidateText(target);
+      if (!candidateText) return;
+
+      const matchScore = scoreFocusTextMatch(candidateText, normalizedSearch, tokens);
+      if (matchScore <= 0) return;
+
+      const rect = target.getBoundingClientRect();
+      const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+      const targetArea = Math.max(1, rect.width * rect.height);
+      const areaPenalty = targetArea > viewportArea * 0.55 ? 0.08 : 0;
+      const depthBonus = Math.min(0.08, getElementDepth(target) / 400);
+      const finalScore = matchScore + depthBonus - areaPenalty;
+
+      if (finalScore > bestScore) {
+        bestScore = finalScore;
+        bestTarget = target;
+      }
+    };
+
+    const scanXPathTextNodes = (expression, limit) => {
+      let snapshot;
+      try {
+        snapshot = document.evaluate(expression, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      } catch {
+        return;
+      }
+
+      const total = Math.min(snapshot.snapshotLength, limit);
+      for (let index = 0; index < total; index += 1) {
+        const node = snapshot.snapshotItem(index);
+        considerNode(node);
+        if (bestScore >= 0.98) break;
+      }
+    };
+
+    const lowerExpr = 'translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")';
+    const exactExpr = `//text()[contains(${lowerExpr}, ${buildXPathStringLiteral(normalizedSearch)})]`;
+    scanXPathTextNodes(exactExpr, 2400);
+
+    if (bestTarget && bestScore >= 0.76) {
+      return bestTarget;
+    }
+
+    const tokenClauses = tokens.slice(0, 4)
+      .map((token) => `contains(${lowerExpr}, ${buildXPathStringLiteral(token)})`);
+    if (tokenClauses.length > 0) {
+      const fuzzyExpr = `//text()[${tokenClauses.join(' or ')}]`;
+      scanXPathTextNodes(fuzzyExpr, 3600);
+      if (bestTarget && bestScore >= 0.6) {
+        return bestTarget;
+      }
+    }
+
+    // TreeWalker fallback helps when text is split/virtualized across dynamic React fragments.
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    let scanned = 0;
+    let node;
+    while ((node = walker.nextNode()) && scanned < 4200) {
+      scanned += 1;
+      considerNode(node);
+      if (bestScore >= 0.98) break;
+    }
+
+    if (bestTarget && bestScore >= 0.52) {
+      return bestTarget;
+    }
+
+    return null;
+  }
+
+  async function findReactElementByTextWithRetry(searchText, maxAttempts = 5, delayMs = 300) {
+    const normalizedSearch = normalizeScanText(searchText || '');
+    if (!normalizedSearch) return null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const el = findReactElementByText(normalizedSearch);
+      if (el && isUsableFocusTarget(el)) {
+        return el;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
+    return null;
+  }
+
+  function findWithMutationObserver(searchText, callback, timeoutMs = 3000) {
+    const normalizedSearch = normalizeScanText(searchText || '');
+    if (!normalizedSearch || typeof callback !== 'function' || !document.body) {
+      return () => {};
+    }
+
+    let finished = false;
+    const observer = new MutationObserver(() => {
+      const el = findReactElementByText(normalizedSearch);
+      if (!el || !isUsableFocusTarget(el)) return;
+
+      finished = true;
+      observer.disconnect();
+      callback(el);
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    const timeoutId = setTimeout(() => {
+      if (finished) return;
+      observer.disconnect();
+    }, timeoutMs);
+
+    return () => {
+      finished = true;
+      clearTimeout(timeoutId);
+      observer.disconnect();
+    };
+  }
+
+  function waitForReactElementByMutation(searchText, timeoutMs = 3000) {
+    return new Promise((resolve) => {
+      const initial = findReactElementByText(searchText);
+      if (initial && isUsableFocusTarget(initial)) {
+        resolve(initial);
+        return;
+      }
+
+      let settled = false;
+      const stop = findWithMutationObserver(searchText, (el) => {
+        if (settled) return;
+        settled = true;
+        stop();
+        resolve(el);
+      }, timeoutMs);
+
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        stop();
+        resolve(null);
+      }, timeoutMs + 20);
+    });
+  }
+
+  function flashFullPageFocusFallback() {
+    const target = document.body || document.documentElement;
+    if (!target) return;
+
+    const previousOutline = target.style.outline;
+    const previousOffset = target.style.outlineOffset;
+    target.style.outline = '4px solid red';
+    target.style.outlineOffset = '-4px';
+
+    scheduleTrackedTimeout(() => {
+      target.style.outline = previousOutline;
+      target.style.outlineOffset = previousOffset;
+    }, 2000);
+  }
+
+  function buildPatternTargetMeta(element) {
+    const target = resolveOverlayTarget(element);
+    if (!target) return null;
+
+    const isGeneric = isGenericFocusContainer(target);
+
+    let targetId = '';
+    if (!isGeneric) {
+      targetId = target.getAttribute(PATTERN_TARGET_ATTR) || '';
+      if (!targetId) {
+        patternTargetSequence += 1;
+        targetId = `cs-pattern-${Date.now().toString(36)}-${patternTargetSequence}`;
+        target.setAttribute(PATTERN_TARGET_ATTR, targetId);
+      }
+
+      if (!state.patternTargetElements.includes(target)) {
+        state.patternTargetElements.push(target);
+      }
+    }
+
+    const textPreview = normalizeScanText(target.innerText || target.textContent || '').slice(0, 120);
+    return {
+      id: targetId,
+      tag: String(target.tagName || '').toLowerCase(),
+      textPreview,
+      selector: isGeneric ? '' : buildStableElementSelector(target),
+      domId: isGeneric ? '' : String(target.id || '').trim().slice(0, 100),
+      generic: isGeneric,
+    };
+  }
+
+  function getPatternTargetSelector(targetId) {
+    const safeId = String(targetId || '').trim();
+    if (!safeId) return '';
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+      return `[${PATTERN_TARGET_ATTR}="${CSS.escape(safeId)}"]`;
+    }
+    return `[${PATTERN_TARGET_ATTR}="${safeId.replace(/(["\\])/g, '\\$1')}"]`;
+  }
+
+  function findElementContainingSnippet(snippet, options = {}) {
+    const normalizedSnippet = normalizeScanText(snippet || '').slice(0, 120);
+    if (!normalizedSnippet) return null;
+
+    const preferredTag = String(options.tag || '').trim().toLowerCase();
+    const baseSelector = 'button, a, label, input, img, div, span, p, li, section, article';
+    const selector = /^[a-z][a-z0-9-]*$/.test(preferredTag)
+      ? `${preferredTag}, ${baseSelector}`
+      : baseSelector;
+
+    const candidates = document.querySelectorAll(selector);
+    const scanLimit = Math.min(candidates.length, 2600);
+    const tokens = normalizedSnippet
+      .split(/\s+/)
+      .map((token) => token.replace(/[^a-z0-9]/gi, '').toLowerCase())
+      .filter((token) => token.length >= 3)
+      .slice(0, 12);
+
+    let bestCandidate = null;
+    let bestScore = 0;
+
+    for (let index = 0; index < scanLimit; index += 1) {
+      const candidate = candidates[index];
+      if (!isUsableFocusTarget(candidate)) continue;
+
+      const haystack = getPatternCandidateText(candidate);
+      if (!haystack) continue;
+
+      const normalizedHaystack = haystack.toLowerCase();
+      const directHit = normalizedHaystack.includes(normalizedSnippet.toLowerCase());
+      if (directHit) {
+        return candidate;
+      }
+
+      if (tokens.length === 0) continue;
+      let matchedTokenCount = 0;
+      tokens.forEach((token) => {
+        if (normalizedHaystack.includes(token)) matchedTokenCount += 1;
+      });
+
+      const tokenScore = matchedTokenCount / tokens.length;
+      if (tokenScore > bestScore) {
+        bestScore = tokenScore;
+        bestCandidate = candidate;
+      }
+    }
+
+    if (bestCandidate && bestScore >= 0.58) {
+      return bestCandidate;
+    }
+
+    return null;
+  }
+
+  function findPatternFocusElement(patternRequest) {
+    const request = patternRequest || {};
+    const requestText = normalizeScanText(
+      request.patternText
+      || request.snippet
+      || request.text
+      || request.target?.textPreview
+      || '',
+    );
+
+    const reactTextMatch = findReactElementByText(requestText);
+    if (reactTextMatch) return reactTextMatch;
+
+    const targetId = String(request.target?.id || request.targetId || '').trim();
+    if (targetId) {
+      const directMatch = document.querySelector(getPatternTargetSelector(targetId));
+      if (isUsableFocusTarget(directMatch)) return directMatch;
+    }
+
+    const selectorMatch = selectElementBySelector(request.target?.selector);
+    if (selectorMatch) return selectorMatch;
+
+    const domId = String(request.target?.domId || '').trim();
+    if (domId) {
+      const domIdMatch = document.getElementById(domId);
+      if (isUsableFocusTarget(domIdMatch)) {
+        return domIdMatch;
+      }
+    }
+
+    const normalizedType = String(request.type || '').trim().toLowerCase();
+    const normalizedName = String(request.name || '').trim().toLowerCase();
+    const normalizedText = requestText.slice(0, 120);
+    const preferredTag = String(request.target?.tag || '').trim().toLowerCase();
+
+    const livePattern = state.patterns.find((pattern) => {
+      if (!pattern) return false;
+      const typeMatches = normalizedType && String(pattern.type || '').trim().toLowerCase() === normalizedType;
+      const nameMatches = normalizedName && String(pattern.name || '').trim().toLowerCase() === normalizedName;
+      const textMatches = normalizedText && normalizeScanText(pattern.text || '').includes(normalizedText);
+      return typeMatches || nameMatches || textMatches;
+    });
+
+    if (livePattern?.element) {
+      const resolvedLiveTarget = resolveOverlayTarget(livePattern.element);
+      if (isUsableFocusTarget(resolvedLiveTarget)) {
+        return resolvedLiveTarget;
+      }
+    }
+
+    if (normalizedText) {
+      const reactSnippetTarget = findReactElementByText(normalizedText);
+      if (reactSnippetTarget) return reactSnippetTarget;
+
+      const snippetTarget = findElementContainingSnippet(normalizedText, { tag: preferredTag });
+      if (snippetTarget) return snippetTarget;
+    }
+
+    const liveText = normalizeScanText(livePattern?.text || '').slice(0, 120);
+    if (liveText) {
+      const liveTextTarget = findElementContainingSnippet(liveText, { tag: preferredTag });
+      if (liveTextTarget) return liveTextTarget;
+    }
+
+    return null;
+  }
+
+  function clearPatternFocusOverlay() {
+    if (activeFocusAnimationFrame) {
+      cancelAnimationFrame(activeFocusAnimationFrame);
+      activeFocusAnimationFrame = 0;
+    }
+
+    if (activeFocusClearTimer) {
+      clearTimeout(activeFocusClearTimer);
+      scheduledAnalysisTimers.delete(activeFocusClearTimer);
+      activeFocusClearTimer = null;
+    }
+
+    activeFocusTarget = null;
+
+    if (activeFocusOverlay?.parentElement) {
+      activeFocusOverlay.remove();
+    }
+    activeFocusOverlay = null;
+
+    const staleOverlay = document.getElementById(PATTERN_FOCUS_OVERLAY_ID);
+    if (staleOverlay) {
+      staleOverlay.remove();
+    }
+  }
+
+  function updatePatternFocusOverlayPosition(overlay, target) {
+    if (!overlay || !target || !target.isConnected) return false;
+
+    const rect = target.getBoundingClientRect();
+    if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width < 1 || rect.height < 1) {
+      return false;
+    }
+
+    const pad = PATTERN_FOCUS_PADDING_PX;
+  const top = window.scrollY + rect.top - pad;
+  const left = window.scrollX + rect.left - pad;
+    const width = Math.max(2, rect.width + (pad * 2));
+    const height = Math.max(2, rect.height + (pad * 2));
+
+    overlay.style.top = `${top}px`;
+    overlay.style.left = `${left}px`;
+    overlay.style.width = `${width}px`;
+    overlay.style.height = `${height}px`;
+    return true;
+  }
+
+  function drawPatternFocusOverlay(element, label) {
+    const target = resolveOverlayTarget(element);
+    if (!target) return false;
+
+    clearPatternFocusOverlay();
+
+    const overlay = document.createElement('div');
+    overlay.id = PATTERN_FOCUS_OVERLAY_ID;
+    overlay.className = 'cs-focus-overlay';
+    overlay.style.willChange = 'top,left,width,height';
+
+    const labelText = String(label || '').trim();
+    if (labelText) {
+      const tag = document.createElement('div');
+      tag.className = 'cs-focus-overlay-label';
+      tag.textContent = `ConsumerShield: ${labelText}`;
+      overlay.appendChild(tag);
+    }
+
+    if (!document.body) return false;
+    document.body.appendChild(overlay);
+    activeFocusOverlay = overlay;
+    activeFocusTarget = target;
+
+    if (!updatePatternFocusOverlayPosition(overlay, target)) {
+      clearPatternFocusOverlay();
+      return false;
+    }
+
+    const trackPosition = () => {
+      if (!activeFocusOverlay || !activeFocusTarget) {
+        activeFocusAnimationFrame = 0;
+        return;
+      }
+
+      const ok = updatePatternFocusOverlayPosition(activeFocusOverlay, activeFocusTarget);
+      if (!ok) {
+        clearPatternFocusOverlay();
+        return;
+      }
+
+      activeFocusAnimationFrame = requestAnimationFrame(trackPosition);
+    };
+
+    activeFocusAnimationFrame = requestAnimationFrame(trackPosition);
+
+    activeFocusClearTimer = scheduleTrackedTimeout(() => {
+      activeFocusClearTimer = null;
+      clearPatternFocusOverlay();
+    }, PATTERN_FOCUS_DURATION_MS);
+
+    return true;
+  }
+
+  function focusPatternElement(element, label) {
+    const target = resolveOverlayTarget(element);
+    if (!target) return false;
+
+    try {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    } catch {
+      target.scrollIntoView();
+    }
+
+    if (typeof target.focus === 'function') {
+      try {
+        target.focus({ preventScroll: true });
+      } catch {
+        // Ignore focus failures on non-focusable elements.
+      }
+    }
+
+    target.classList.remove(PATTERN_FOCUS_CLASS);
+    void target.offsetWidth;
+    target.classList.add(PATTERN_FOCUS_CLASS);
+
+    drawPatternFocusOverlay(target, label);
+
+    scheduleTrackedTimeout(() => {
+      target.classList.remove(PATTERN_FOCUS_CLASS);
+    }, PATTERN_FOCUS_DURATION_MS - 200);
+
+    return true;
   }
 
   function extractHostnameFromUrl(raw) {
@@ -1549,6 +2251,7 @@
                   penalty: p.penalty,
                   description: p.description,
                   text: p.text,
+                  target: buildPatternTargetMeta(p.element),
                 })),
               },
             }
@@ -1570,7 +2273,52 @@
   }
 
   if (chrome?.runtime?.onMessage) {
-    chrome.runtime.onMessage.addListener((message) => {
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.action === 'focusDetectedPattern') {
+        (async () => {
+          injectOverlayStyles();
+          const pattern = message.pattern || {};
+          const patternText = normalizeScanText(
+            pattern.patternText
+            || pattern.snippet
+            || pattern.text
+            || pattern.target?.textPreview
+            || '',
+          );
+
+          let target = await findReactElementByTextWithRetry(patternText);
+          if (!target) {
+            target = findPatternFocusElement(pattern);
+          }
+          if (!target && patternText) {
+            target = await waitForReactElementByMutation(patternText, 3000);
+          }
+
+          const focusLabel = String(pattern?.name || pattern?.type || 'Detected pattern');
+          const focused = target ? focusPatternElement(target, focusLabel) : false;
+
+          if (!focused) {
+            flashFullPageFocusFallback();
+          }
+
+          sendResponse({
+            success: focused,
+            searchText: patternText.slice(0, 120),
+            targetTag: focused ? String(target?.tagName || '').toLowerCase() : null,
+            fallback: focused ? null : 'page-outline',
+          });
+        })().catch((error) => {
+          console.warn('[ConsumerShield] Focus fallback error:', error);
+          flashFullPageFocusFallback();
+          sendResponse({
+            success: false,
+            targetTag: null,
+            fallback: 'page-outline',
+          });
+        });
+        return true;
+      }
+
       if (message?.action !== 'extensionEnabledChanged') return;
 
       extensionEnabled = Boolean(message.enabled);
