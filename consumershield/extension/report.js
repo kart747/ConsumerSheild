@@ -200,7 +200,7 @@ function resolveTrackerDomain(tracker, index) {
   return `tracker-${index + 1}.local`;
 }
 
-function normalizeTrackerEntries(analysis, privacy) {
+function normalizeTrackerEntries(analysis, privacy, site) {
   const mergedTrackers = [];
   if (Array.isArray(privacy.trackers)) {
     mergedTrackers.push(...privacy.trackers);
@@ -237,8 +237,15 @@ function normalizeTrackerEntries(analysis, privacy) {
 
   const byDomain = new Map();
   mergedTrackers.forEach((tracker, index) => {
-    const domain = resolveTrackerDomain(tracker, index);
+    let domain = resolveTrackerDomain(tracker, index);
     if (!domain) return;
+
+    if (!domain.includes('.') && !domain.endsWith('.local')) {
+      const siteDomain = toHostname(site);
+      if (/amazon\.(in|com)$/i.test(siteDomain)) {
+        domain = `${domain}.${siteDomain}`;
+      }
+    }
 
     const knownAmazonKey = toAmazonTrackerKey(domain);
     const isAmazon = isAmazonRelatedDomain(domain);
@@ -437,7 +444,7 @@ function toReportShape(analysis) {
       }))
     : [];
 
-  const trackers = normalizeTrackerEntries(analysis, privacy);
+  const trackers = normalizeTrackerEntries(analysis, privacy, site);
   const legalMappings = normalizeLegalMappings(analysis, darkPatterns, trackers);
 
   const privacyScore = Number(privacy.riskScore);
