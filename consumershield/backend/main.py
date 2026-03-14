@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
+import json
 from transformers import pipeline
 from sqlalchemy.orm import Session
 
@@ -423,6 +424,16 @@ app = FastAPI(
     version="1.0.0",
     lifespan=app_lifespan,
 )
+
+# Load Tracker Radar
+radar_file = os.path.join(os.path.dirname(__file__), 'radar_lite.json')
+radar_lookup = {}
+if os.path.exists(radar_file):
+    with open(radar_file, 'r') as f:
+        radar_lookup = json.load(f)
+    print(f"[ConsumerShield] Loaded {len(radar_lookup)} tracker definitions from Radar Lite")
+else:
+    print("[ConsumerShield] Warning: radar_lite.json not found. Run radar_lite.py first.")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1910,6 +1921,38 @@ async def analyze_privacy(req: PrivacyOnlyRequest, db: Session = Depends(get_db)
         "violations": violations,
         **_build_report_metadata(stored_report),
     }
+
+
+@app.post("/analyze-domains")
+async def analyze_domains(domains: List[str]):
+    found_trackers = []
+    
+    # Process only unique domains
+    unique_domains = list(set(domains))
+    
+    for d in unique_domains:
+        # Check if the domain or its parent variants are in our 'Radar Lite'
+        # e.g., check 'sub.ad.google.com', then 'ad.google.com', then 'google.com'
+        parts = d.split('.')
+        for i in range(len(parts) - 1):
+            check_domain = '.'.join(parts[i:])
+            if check_domain in radar_lookup:
+                entity_info = radar_lookup[check_domain]
+                prevalence = entity_info.get('prevalence', 0)
+                
+                # Assign rough types based on entity name or simple heuristics
+                # The Tracker Radar provides categories, but since we optimized it out in radar_lite.py,
+                # we will default to 'advertising' or 'analytics' if prevalence is high
+                t_type = "advertising" if prevalence > 0.05 else "analytics"
+                
+                found_trackers.append({
+                    "domain": d,
+                    "type": t_type, 
+                    "name": entity_info.get('displayName', 'Unknown Entity')
+                })
+                break # Matched the most specific subdomain
+                
+    return {"trackers": found_trackers, "total": len(found_trackers)}
 
 
 @app.post("/analyze-dark-patterns")

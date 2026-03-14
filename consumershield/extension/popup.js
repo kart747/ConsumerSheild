@@ -320,6 +320,21 @@ async function loadAndRender() {
   const domain = normalizeDomain(tab.url);
   chrome.storage.local.get([domain], async (result) => {
     const analysis = result[domain];
+    if (analysis) {
+      document.getElementById('scanning-indicator')?.classList.add('hidden');
+      renderOverview(analysis);
+      renderPrivacyTab(analysis);
+      renderManipulationTab(analysis);
+      animateReportPanels();
+
+      displayAIInsight(
+        tab,
+        analysis.privacy?.trackers || [],
+        analysis.manipulation?.patterns || []
+      );
+      return;
+    }
+
     const now = Date.now();
     const patterns = analysis?.manipulation?.patterns || [];
     const analysisTs = Number(analysis?.timestamp || 0);
@@ -345,18 +360,6 @@ async function loadAndRender() {
       setTimeout(loadAndRender, 2000);
       return;
     }
-
-    document.getElementById('scanning-indicator')?.classList.add('hidden');
-    renderOverview(analysis);
-    renderPrivacyTab(analysis);
-    renderManipulationTab(analysis);
-    animateReportPanels();
-
-    displayAIInsight(
-      tab,
-      analysis.privacy?.trackers || [],
-      analysis.manipulation?.patterns || []
-    );
   });
 }
 
@@ -1062,7 +1065,6 @@ function buildReportHTML(analysis) {
       </div>
     `)
     .join('');
-
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
   <title>ConsumerShield Report — ${escHtml(analysis.domain)}</title>
   <style>

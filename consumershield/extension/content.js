@@ -10,7 +10,7 @@
   'use strict';
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // TRACKER DATABASE
+  // TRACKER EXTRACTOR (Dynamic collection for Backend Radar Lite)
   // ═══════════════════════════════════════════════════════════════════════════
 
   const KNOWN_TRACKERS = [
@@ -302,7 +302,8 @@
   // ═══════════════════════════════════════════════════════════════════════════
 
   const state = {
-    trackers: [],
+    detectedDomains: [], // Store domains to send to background
+    trackers: [],        // Will be empty in content.js now, fulfilled by background.js
     policy: { thirdPartySharing: false, noOptOut: false, extensiveCollection: false, hasOptOut: false },
     fingerprinting: false,
     patterns: [],
@@ -396,7 +397,8 @@
 
   function detectTrackers() {
     const pageHTML = document.documentElement?.innerHTML || '';
-    const firstPartyDomain = normalizeDomainLike(window.location.hostname);
+    const mainHost = window.location.hostname;
+    const thirdPartyDomains = new Set();
     const trackerMap = new Map();
 
     const upsertTracker = (tracker, source, confidence = 0.72) => {
@@ -420,28 +422,38 @@
     };
 
     // 1) Inspect domains from page resources (script/img/iframe/link/etc.)
-    const resourceHits = collectResourceDomains();
-    resourceHits.forEach((hit) => {
-      const domain = normalizeDomainLike(hit.domain);
-      if (!domain || isFirstPartyDomain(domain, firstPartyDomain)) return;
-
-      const known = findKnownTracker(domain);
-      if (known) {
-        upsertTracker(known, hit.source, 0.93);
-        return;
+    if (window.performance && performance.getEntriesByType) {
+      const resources = performance.getEntriesByType('resource');
+      for (const res of resources) {
+        try {
+          const url = new URL(res.name);
+          if (url.hostname && url.hostname !== mainHost && !url.hostname.endsWith('.' + mainHost)) {
+            thirdPartyDomains.add(url.hostname);
+            const known = findKnownTracker(url.hostname);
+            if (known) {
+              upsertTracker(known, 'resource', 0.93);
+            } else if (TRACKING_HOST_HINTS.test(url.hostname)) {
+              upsertTracker({ domain: url.hostname, type: 'tracker', name: 'Potential Tracker' }, 'resource-hint', 0.69);
+            }
+          }
+        } catch(e) {}
       }
+    }
 
-      if (TRACKING_HOST_HINTS.test(domain)) {
-        upsertTracker(
-          {
-            domain,
-            type: 'tracker',
-            name: 'Potential Tracking Endpoint',
-          },
-          hit.source,
-          0.69,
-        );
-      }
+    document.querySelectorAll('script[src], iframe[src], link[href]').forEach(el => {
+      try {
+        const urlStr = el.src || el.href;
+        if (urlStr) {
+          const url = new URL(urlStr, window.location.href);
+          if (url.hostname && url.hostname !== mainHost && !url.hostname.endsWith('.' + mainHost)) {
+            thirdPartyDomains.add(url.hostname);
+            const known = findKnownTracker(url.hostname);
+            if (known) {
+              upsertTracker(known, 'dom-resource', 0.93);
+            }
+          }
+        }
+      } catch(e) {}
     });
 
     // 2) Signature fallback from HTML/script text
@@ -464,6 +476,7 @@
       );
     });
 
+    state.detectedDomains = Array.from(thirdPartyDomains);
     state.trackers = Array.from(trackerMap.values())
       .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
       .map((item) => ({
@@ -485,7 +498,6 @@
       if (regex.test(pageHTML)) fingerprintSignalHits += 1;
     });
     state.fingerprinting = fingerprintSignalHits >= 2;
-
     console.log('[ConsumerShield] Trackers found:', state.trackers);
   }
 
@@ -1523,6 +1535,7 @@
               timestamp: Date.now(),
               privacy: {
                 trackers: state.trackers,
+                detectedDomains: state.detectedDomains,
                 policy: state.policy,
                 fingerprinting: state.fingerprinting,
               },
@@ -1591,9 +1604,9 @@
     }, 800);
   }
 
-  // Re-run on SPA navigation
+  // Re-run on SPA navigation (More efficient check)
   let lastUrl = location.href;
-  const observer = new MutationObserver(() => {
+  setInterval(() => {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       resetAnalysisState();
@@ -1603,7 +1616,6 @@
         runAnalysis();
       }, 1200);
     }
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
+  }, 2000);
 
 })();
