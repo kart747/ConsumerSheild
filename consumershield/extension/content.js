@@ -314,12 +314,51 @@
   let warmupRescanScheduled = false;
   let extensionEnabled = true;
   const EXTENSION_ENABLED_KEY = 'consumershield_enabled';
+  const scheduledAnalysisTimers = new Set();
+
+  function isExtensionContextInvalidatedError(error) {
+    return /extension context invalidated/i.test(String(error?.message || error || ''));
+  }
+
+  function scheduleTrackedTimeout(callback, delayMs) {
+    const timerId = setTimeout(() => {
+      scheduledAnalysisTimers.delete(timerId);
+      callback();
+    }, delayMs);
+    scheduledAnalysisTimers.add(timerId);
+    return timerId;
+  }
+
+  function clearScheduledAnalysisTimers() {
+    scheduledAnalysisTimers.forEach((timerId) => clearTimeout(timerId));
+    scheduledAnalysisTimers.clear();
+  }
 
   async function refreshExtensionEnabledState() {
     if (!chrome?.storage?.local) return extensionEnabled;
-    const result = await new Promise((resolve) => {
-      chrome.storage.local.get([EXTENSION_ENABLED_KEY], resolve);
-    });
+
+    let result;
+    try {
+      result = await new Promise((resolve, reject) => {
+        try {
+          chrome.storage.local.get([EXTENSION_ENABLED_KEY], (storageResult) => {
+            if (chrome.runtime?.lastError) {
+              reject(new Error(chrome.runtime.lastError.message));
+              return;
+            }
+            resolve(storageResult);
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    } catch (error) {
+      if (isExtensionContextInvalidatedError(error)) {
+        extensionEnabled = false;
+        return extensionEnabled;
+      }
+      throw error;
+    }
 
     if (typeof result[EXTENSION_ENABLED_KEY] === 'boolean') {
       extensionEnabled = result[EXTENSION_ENABLED_KEY];
@@ -332,6 +371,7 @@
   function resetAnalysisState() {
     analysisRun = false;
     warmupRescanScheduled = false;
+    clearScheduledAnalysisTimers();
     state.trackers = [];
     state.patterns = [];
     state.policy = { thirdPartySharing: false, noOptOut: false, extensiveCollection: false, hasOptOut: false };
@@ -1458,7 +1498,8 @@
     if (!warmupRescanScheduled) {
       warmupRescanScheduled = true;
       [2800, 6500].forEach((delayMs) => {
-        setTimeout(() => {
+        scheduleTrackedTimeout(() => {
+          if (!extensionEnabled) return;
           resetAnalysisState();
           runAnalysis();
         }, delayMs);
@@ -1473,37 +1514,45 @@
 
       // Send results to background worker
       if (chrome && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({
-          action: 'analyzeComplete',
-          data: {
-            url: window.location.href,
-            domain: window.location.hostname,
-            timestamp: Date.now(),
-            privacy: {
-              trackers: state.trackers,
-              policy: state.policy,
-              fingerprinting: state.fingerprinting,
-            },
-            manipulation: {
-              patterns: state.patterns.map(p => ({
-                type: p.type,
-                name: p.name,
-                severity: p.severity,
-                confidence: p.confidence,
-                law: p.law,
-                penalty: p.penalty,
-                description: p.description,
-                text: p.text,
-              })),
-            },
+        try {
+          chrome.runtime.sendMessage({
+            action: 'analyzeComplete',
+            data: {
+              url: window.location.href,
+              domain: window.location.hostname,
+              timestamp: Date.now(),
+              privacy: {
+                trackers: state.trackers,
+                policy: state.policy,
+                fingerprinting: state.fingerprinting,
+              },
+              manipulation: {
+                patterns: state.patterns.map(p => ({
+                  type: p.type,
+                  name: p.name,
+                  severity: p.severity,
+                  confidence: p.confidence,
+                  law: p.law,
+                  penalty: p.penalty,
+                  description: p.description,
+                  text: p.text,
+                })),
+              },
+            }
+          }, () => {
+            // Ignore transient messaging failures (popup closed / extension reloaded)
+            if (chrome.runtime?.lastError) { /* noop */ }
+          });
+        } catch (error) {
+          if (!isExtensionContextInvalidatedError(error)) {
+            throw error;
           }
-        }, () => {
-          // Ignore connection errors (popup may not be open)
-          if (chrome.runtime.lastError) { /* noop */ }
-        });
+        }
       }
     } catch (err) {
-      console.warn('[ConsumerShield] Analysis error:', err);
+      if (!isExtensionContextInvalidatedError(err)) {
+        console.warn('[ConsumerShield] Analysis error:', err);
+      }
     }
   }
 
@@ -1522,6 +1571,10 @@
     });
   }
 
+  window.addEventListener('beforeunload', () => {
+    clearScheduledAnalysisTimers();
+  });
+
   // Run after page is interactive
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', async () => {
@@ -1531,7 +1584,7 @@
     });
   } else {
     // Slight delay so dynamic content has time to render
-    setTimeout(async () => {
+    scheduleTrackedTimeout(async () => {
       await refreshExtensionEnabledState();
       if (!extensionEnabled) return;
       runAnalysis();
@@ -1544,7 +1597,7 @@
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       resetAnalysisState();
-      setTimeout(async () => {
+      scheduleTrackedTimeout(async () => {
         await refreshExtensionEnabledState();
         if (!extensionEnabled) return;
         runAnalysis();
