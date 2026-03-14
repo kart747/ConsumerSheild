@@ -15,21 +15,42 @@ import base64
 import math
 import re
 import time
+import uuid
 import ipaddress
+from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from transformers import pipeline
+from sqlalchemy.orm import Session
 
 from regulatory_database import (
     get_privacy_violations,
     get_manipulation_violations,
     REGULATORY_FRAMEWORK,
 )
-from ethereum_anchor import store_report_hash_on_chain
+from database import (
+    ReportRecord,
+    SessionLocal,
+    init_db,
+    get_db,
+    build_canonical_payload,
+    canonical_payload_to_json,
+    encode_pattern_names,
+    decode_pattern_names,
+    encode_detected_patterns,
+    decode_detected_patterns,
+)
+from ethereum_anchor import (
+    store_report_hash_on_chain,
+    build_report_sha256,
+    build_report_keccak,
+    store_precomputed_hash_on_chain,
+    verify_report_hash_on_chain,
+)
 
 load_dotenv()
 
@@ -80,6 +101,8 @@ def _load_model_candidates_from_env(defaults: List[str]) -> List[str]:
 _GEMINI_MODEL_CANDIDATES = _load_model_candidates_from_env(MODELS_TO_TRY)
 _GEMINI_MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
 _GEMINI_GLOBAL_COOLDOWN_UNTIL: float = 0.0
+
+DARK_PATTERN_THRESHOLD = 7.0
 
 
 def _extract_retry_seconds_from_error(error_text: str) -> Optional[int]:
@@ -386,11 +409,18 @@ def predict_tracker_score(domain: str, radar_match: Optional[Dict[str, Any]], re
 
 load_radar_lite()
 
+@asynccontextmanager
+async def app_lifespan(_: FastAPI):
+    init_db()
+    yield
+
+
 # ── App ───────────────────────────────────────────────────────
 app = FastAPI(
     title="ConsumerShield API",
     description="Complete consumer protection analysis — privacy + dark patterns",
     version="1.0.0",
+    lifespan=app_lifespan,
 )
 
 app.add_middleware(
@@ -487,6 +517,65 @@ class AnalyzeDomainsResponse(BaseModel):
     resolved_trackers: List[Dict[str, Any]]
     suspicious_domains: List[Dict[str, Any]]
     total_privacy_score: float
+
+
+class SaveReportRequest(BaseModel):
+    url: str
+    domain: Optional[str] = None
+    privacy_risk: float
+    manipulation_risk: float
+    overall_risk: float
+    pattern_names: List[str] = []
+    tracker_count: int = 0
+    combined_insight: Optional[str] = None
+    anchor_on_save: bool = True
+
+
+class StoredReportResponse(BaseModel):
+    report_id: str
+    url: str
+    domain: str
+    report_hash: str
+    canonical_payload_json: str
+    tx_hash: Optional[str] = None
+    anchor_status: str
+    anchor_error: Optional[str] = None
+    privacy_risk: float
+    manipulation_risk: float
+    overall_risk: float
+    pattern_count: int
+    tracker_count: int
+    pattern_names: List[str]
+    combined_insight: Optional[str] = None
+    created_at: str
+
+
+class TriggerAnchorResponse(BaseModel):
+    report_id: str
+    anchor_status: str
+    tx_hash: Optional[str] = None
+    detail: str
+
+
+class VerifyReportResponse(BaseModel):
+    report_id: str
+    status: str
+    verified: bool
+    db_hash_matches: bool
+    expected_hash: str
+    recomputed_hash: str
+    on_chain_hash: Optional[str] = None
+    tx_hash: Optional[str] = None
+    error: Optional[str] = None
+
+
+class WallOfShameItem(BaseModel):
+    url: str
+    risk_score: float
+    detected_patterns: List[str]
+    timestamp: str
+    blockchain_proof: bool
+    blockchain_tx_hash: Optional[str] = None
 
 # ── Risk Calculators ──────────────────────────────────────────
 
@@ -870,7 +959,7 @@ def _normalize_tier3_patterns_from_json(parsed: Dict[str, Any]) -> List[Dict[str
             })
 
     return tier3
-
+ 
 async def make_ai_insight(
     url: str,
     privacy: PrivacyData,
@@ -1145,6 +1234,264 @@ async def make_ai_insight(
         "combined_summary": combined_summary
     }
 
+
+def _parse_canonical_payload_json(canonical_payload_json: str) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(canonical_payload_json or "{}")
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {"raw_payload": str(canonical_payload_json or "")}
+
+
+def _normalize_detected_patterns(patterns: List[str]) -> List[str]:
+    return sorted({str(item).strip() for item in patterns if str(item).strip()})
+
+
+def _build_stable_report_payload(url: str, detected_patterns: List[str], details: str, risk_score: float) -> Dict[str, Any]:
+    # Timestamp intentionally excluded to keep hash deterministic across retries.
+    return {
+        "url": str(url or "").strip(),
+        "detected_patterns": _normalize_detected_patterns(detected_patterns),
+        "details": str(details or "").strip(),
+        "risk_score": round(float(risk_score or 0.0), 3),
+    }
+
+
+def _find_duplicate_report(
+    db: Session,
+    *,
+    domain: str,
+    report_hash: str,
+    pattern_names_json: str,
+    privacy_risk: float,
+    manipulation_risk: float,
+    overall_risk: float,
+    tracker_count: int,
+) -> Optional[ReportRecord]:
+    normalized_domain = normalize_domain(domain)
+    normalized_hash = str(report_hash or "").strip()
+    tracker_count_val = int(tracker_count or 0)
+    epsilon = 0.01
+
+    if normalized_hash:
+        exact = (
+            db.query(ReportRecord)
+            .filter(ReportRecord.report_hash == normalized_hash)
+            .order_by(ReportRecord.id.desc())
+            .first()
+        )
+        if exact:
+            return exact
+
+    return (
+        db.query(ReportRecord)
+        .filter(
+            ReportRecord.domain == normalized_domain,
+            ReportRecord.pattern_names_json == str(pattern_names_json or "[]"),
+            ReportRecord.tracker_count == tracker_count_val,
+            ReportRecord.privacy_risk.between(float(privacy_risk or 0.0) - epsilon, float(privacy_risk or 0.0) + epsilon),
+            ReportRecord.manipulation_risk.between(float(manipulation_risk or 0.0) - epsilon, float(manipulation_risk or 0.0) + epsilon),
+            ReportRecord.overall_risk.between(float(overall_risk or 0.0) - epsilon, float(overall_risk or 0.0) + epsilon),
+        )
+        .order_by(ReportRecord.id.desc())
+        .first()
+    )
+
+
+def _effective_anchor_risk(report: ReportRecord) -> float:
+    """Anchor on the stronger signal between overall and manipulation risk."""
+    return max(float(report.risk_score or 0.0), float(report.manipulation_risk or 0.0))
+
+
+def _meets_anchor_threshold(report: ReportRecord) -> bool:
+    return _effective_anchor_risk(report) >= DARK_PATTERN_THRESHOLD
+
+
+def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
+    if not report:
+        return report
+
+    if not _meets_anchor_threshold(report):
+        report.anchor_status = "not_required"
+        report.anchor_error = None
+        db.commit()
+        db.refresh(report)
+        return report
+
+    if bool(report.blockchain_proof):
+        return report
+
+    report_hash = str(report.report_hash or "").strip()
+    if not report_hash:
+        payload = _parse_canonical_payload_json(report.canonical_payload)
+        report_hash = build_report_keccak(payload)
+        report.report_hash = report_hash
+
+    duplicate = (
+        db.query(ReportRecord)
+        .filter(
+            ReportRecord.id != report.id,
+            ReportRecord.report_hash == report_hash,
+            ReportRecord.blockchain_proof.is_(True),
+            ReportRecord.blockchain_tx_hash.isnot(None),
+        )
+        .order_by(ReportRecord.id.desc())
+        .first()
+    )
+
+    if duplicate and duplicate.blockchain_tx_hash:
+        report.blockchain_proof = True
+        report.blockchain_tx_hash = duplicate.blockchain_tx_hash
+        report.tx_hash = duplicate.blockchain_tx_hash
+        report.anchor_status = "anchored"
+        report.anchor_error = "duplicate_hash_reused"
+        db.commit()
+        db.refresh(report)
+        return report
+
+    try:
+        tx_hash = store_precomputed_hash_on_chain(report_hash)
+        report.blockchain_proof = True
+        report.blockchain_tx_hash = tx_hash
+        report.tx_hash = tx_hash
+        report.anchor_status = "anchored"
+        report.anchor_error = None
+    except Exception as exc:
+        report.blockchain_proof = False
+        report.blockchain_tx_hash = None
+        report.tx_hash = None
+        report.anchor_status = "failed"
+        report.anchor_error = str(exc)
+
+    db.commit()
+    db.refresh(report)
+    return report
+
+
+def _save_generated_report(
+    *,
+    db: Session,
+    url: str,
+    risk_score: float,
+    detected_patterns: List[str],
+    details: str,
+    privacy_risk: float,
+    manipulation_risk: float,
+    overall_risk: float,
+    tracker_count: int,
+) -> ReportRecord:
+    detected = _normalize_detected_patterns(detected_patterns)
+    domain = normalize_domain(url)
+    privacy_risk_value = round(float(privacy_risk or 0.0), 2)
+    manipulation_risk_value = round(float(manipulation_risk or 0.0), 2)
+    overall_risk_value = round(float(overall_risk or 0.0), 2)
+    risk_score_value = round(float(risk_score or 0.0), 2)
+    tracker_count_value = int(tracker_count or 0)
+    pattern_names_json = encode_pattern_names(detected)
+
+    stable_payload = _build_stable_report_payload(url, detected, details, risk_score)
+    stable_payload_json = canonical_payload_to_json(stable_payload)
+    report_hash = build_report_keccak(stable_payload)
+
+    duplicate = _find_duplicate_report(
+        db,
+        domain=domain,
+        report_hash=report_hash,
+        pattern_names_json=pattern_names_json,
+        privacy_risk=privacy_risk_value,
+        manipulation_risk=manipulation_risk_value,
+        overall_risk=overall_risk_value,
+        tracker_count=tracker_count_value,
+    )
+    if duplicate:
+        return _anchor_report_if_needed(db, duplicate)
+
+    now = datetime.utcnow()
+    anchor_status = "pending" if max(float(risk_score or 0.0), float(manipulation_risk or 0.0)) >= DARK_PATTERN_THRESHOLD else "not_required"
+
+    record = ReportRecord(
+        report_id=str(uuid.uuid4()),
+        url=str(url or "").strip(),
+        domain=domain,
+        risk_score=risk_score_value,
+        detected_patterns=encode_detected_patterns(detected),
+        details=str(details or "").strip(),
+        timestamp=now,
+        blockchain_proof=False,
+        blockchain_tx_hash=None,
+        report_hash=report_hash,
+        canonical_payload=stable_payload_json,
+        tx_hash=None,
+        anchor_status=anchor_status,
+        anchor_error=None,
+        privacy_risk=privacy_risk_value,
+        manipulation_risk=manipulation_risk_value,
+        overall_risk=overall_risk_value,
+        pattern_count=len(detected),
+        tracker_count=tracker_count_value,
+        pattern_names_json=pattern_names_json,
+        combined_insight=str(details or "").strip(),
+        created_at=now,
+    )
+
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    return _anchor_report_if_needed(db, record)
+
+
+def _build_report_metadata(record: ReportRecord) -> Dict[str, Any]:
+    return {
+        "report_id": record.report_id,
+        "risk_score": float(record.risk_score or 0.0),
+        "blockchain_proof": bool(record.blockchain_proof),
+        "ethereum_tx_hash": record.blockchain_tx_hash,
+    }
+
+
+def _stored_report_to_response(record: ReportRecord) -> StoredReportResponse:
+    created_at = record.created_at.isoformat() + "Z" if record.created_at else ""
+    return StoredReportResponse(
+        report_id=record.report_id,
+        url=record.url,
+        domain=record.domain,
+        report_hash=record.report_hash,
+        canonical_payload_json=record.canonical_payload,
+        tx_hash=record.tx_hash,
+        anchor_status=record.anchor_status,
+        anchor_error=record.anchor_error,
+        privacy_risk=record.privacy_risk,
+        manipulation_risk=record.manipulation_risk,
+        overall_risk=record.overall_risk,
+        pattern_count=record.pattern_count,
+        tracker_count=record.tracker_count,
+        pattern_names=decode_pattern_names(record.pattern_names_json),
+        combined_insight=record.combined_insight,
+        created_at=created_at,
+    )
+
+
+def _anchor_report_worker(report_id: str) -> None:
+    """Runs outside the request cycle to avoid blocking API responses."""
+    db = SessionLocal()
+    report: Optional[ReportRecord] = None
+    try:
+        report = db.query(ReportRecord).filter(ReportRecord.report_id == report_id).first()
+        if not report:
+            return
+
+        _anchor_report_if_needed(db, report)
+    except Exception as exc:
+        if report:
+            report.anchor_status = "failed"
+            report.anchor_error = str(exc)
+            db.commit()
+    finally:
+        db.close()
+
 # ── Endpoints ─────────────────────────────────────────────────
 
 @app.get("/health")
@@ -1162,7 +1509,7 @@ def health():
 
 
 @app.post("/analyze-complete", response_model=CompleteResponse)
-async def analyze_complete(req: CompleteRequest):
+async def analyze_complete(req: CompleteRequest, db: Session = Depends(get_db)):
     p_risk = calc_privacy_risk(req.privacy_data)
     m_risk = calc_manipulation_risk(req.manipulation_data)
     o_risk = round((p_risk + m_risk) / 2, 1)
@@ -1189,6 +1536,24 @@ async def analyze_complete(req: CompleteRequest):
 
     total = len(req.privacy_data.trackers) + len(req.manipulation_data.patterns)
 
+    detected_patterns = [
+        p.name for p in req.manipulation_data.patterns
+        if str(getattr(p, "name", "")).strip()
+    ]
+    stored_report = _save_generated_report(
+        db=db,
+        url=req.url,
+        risk_score=o_risk,
+        detected_patterns=detected_patterns,
+        details=combined.get("combined_summary", "Analysis complete."),
+        privacy_risk=p_risk,
+        manipulation_risk=m_risk,
+        overall_risk=o_risk,
+        tracker_count=len(req.privacy_data.trackers),
+    )
+
+    combined["report_metadata"] = _build_report_metadata(stored_report)
+
     return CompleteResponse(
         url=req.url,
         privacy_risk=p_risk,
@@ -1205,6 +1570,238 @@ async def analyze_complete(req: CompleteRequest):
         ai_powered=GEMINI_AVAILABLE,
         ai_details=combined,
     )
+
+
+@app.post("/reports/save", response_model=StoredReportResponse)
+async def save_report(
+    req: SaveReportRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    resolved_domain = normalize_domain(req.domain or req.url)
+    if not resolved_domain:
+        raise HTTPException(status_code=400, detail="Unable to resolve domain from URL")
+
+    normalized_patterns = sorted({str(name).strip() for name in req.pattern_names if str(name).strip()})
+
+    canonical_payload = build_canonical_payload(
+        url=req.url,
+        domain=resolved_domain,
+        privacy_risk=req.privacy_risk,
+        manipulation_risk=req.manipulation_risk,
+        overall_risk=req.overall_risk,
+        tracker_count=req.tracker_count,
+        pattern_names=normalized_patterns,
+        combined_insight=req.combined_insight or "",
+    )
+    canonical_json = canonical_payload_to_json(canonical_payload)
+    report_hash = build_report_sha256(canonical_payload)
+    pattern_names_json = encode_pattern_names(normalized_patterns)
+    privacy_risk_value = round(float(req.privacy_risk), 2)
+    manipulation_risk_value = round(float(req.manipulation_risk), 2)
+    overall_risk_value = round(float(req.overall_risk), 2)
+    tracker_count_value = int(req.tracker_count or 0)
+
+    duplicate = _find_duplicate_report(
+        db,
+        domain=resolved_domain,
+        report_hash=report_hash,
+        pattern_names_json=pattern_names_json,
+        privacy_risk=privacy_risk_value,
+        manipulation_risk=manipulation_risk_value,
+        overall_risk=overall_risk_value,
+        tracker_count=tracker_count_value,
+    )
+    if duplicate:
+        if req.anchor_on_save and _meets_anchor_threshold(duplicate) and duplicate.anchor_status not in {"anchored", "pending"}:
+            duplicate.anchor_status = "pending"
+            duplicate.anchor_error = None
+            db.commit()
+            db.refresh(duplicate)
+            background_tasks.add_task(_anchor_report_worker, duplicate.report_id)
+        return _stored_report_to_response(duplicate)
+
+    record = ReportRecord(
+        report_id=str(uuid.uuid4()),
+        url=req.url,
+        domain=resolved_domain,
+        risk_score=overall_risk_value,
+        detected_patterns=encode_detected_patterns(normalized_patterns),
+        details=str(req.combined_insight or "").strip(),
+        timestamp=datetime.utcnow(),
+        blockchain_proof=False,
+        blockchain_tx_hash=None,
+        report_hash=report_hash,
+        canonical_payload=canonical_json,
+        tx_hash=None,
+        anchor_status=(
+            "pending"
+            if req.anchor_on_save and max(float(req.overall_risk), float(req.manipulation_risk)) >= DARK_PATTERN_THRESHOLD
+            else ("not_required" if req.anchor_on_save else "not_requested")
+        ),
+        anchor_error=None,
+        privacy_risk=privacy_risk_value,
+        manipulation_risk=manipulation_risk_value,
+        overall_risk=overall_risk_value,
+        pattern_count=len(normalized_patterns),
+        tracker_count=tracker_count_value,
+        pattern_names_json=pattern_names_json,
+        combined_insight=req.combined_insight,
+        created_at=datetime.utcnow(),
+    )
+
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    if req.anchor_on_save and _meets_anchor_threshold(record):
+        background_tasks.add_task(_anchor_report_worker, record.report_id)
+
+    return _stored_report_to_response(record)
+
+
+@app.get("/reports", response_model=List[StoredReportResponse])
+def list_reports(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    safe_limit = min(max(limit, 1), 200)
+    safe_offset = max(offset, 0)
+
+    rows = (
+        db.query(ReportRecord)
+        .order_by(ReportRecord.created_at.desc())
+        .offset(safe_offset)
+        .limit(safe_limit)
+        .all()
+    )
+    return [_stored_report_to_response(row) for row in rows]
+
+
+@app.get("/reports/{report_id}", response_model=StoredReportResponse)
+def get_report(report_id: str, db: Session = Depends(get_db)):
+    row = db.query(ReportRecord).filter(ReportRecord.report_id == report_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return _stored_report_to_response(row)
+
+
+@app.post("/reports/{report_id}/anchor", response_model=TriggerAnchorResponse)
+def trigger_report_anchor(
+    report_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    row = db.query(ReportRecord).filter(ReportRecord.report_id == report_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    if row.anchor_status == "anchored" and row.tx_hash:
+        return TriggerAnchorResponse(
+            report_id=row.report_id,
+            anchor_status=row.anchor_status,
+            tx_hash=row.tx_hash,
+            detail="Report already anchored",
+        )
+
+    row.anchor_status = "pending"
+    row.anchor_error = None
+    db.commit()
+
+    background_tasks.add_task(_anchor_report_worker, row.report_id)
+    return TriggerAnchorResponse(
+        report_id=row.report_id,
+        anchor_status=row.anchor_status,
+        tx_hash=row.tx_hash,
+        detail="Anchoring job queued",
+    )
+
+
+@app.get("/reports/{report_id}/verify", response_model=VerifyReportResponse)
+async def verify_report_integrity(report_id: str, db: Session = Depends(get_db)):
+    row = db.query(ReportRecord).filter(ReportRecord.report_id == report_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    expected_hash = str(row.report_hash or "").strip()
+    canonical_payload = _parse_canonical_payload_json(row.canonical_payload)
+    recomputed_hash = build_report_sha256(canonical_payload)
+    db_hash_matches = bool(expected_hash) and recomputed_hash.lower() == expected_hash.lower()
+
+    if not row.tx_hash:
+        if not db_hash_matches:
+            status = "tampered"
+            message = "Report content hash mismatch in database"
+        elif row.anchor_status == "not_requested":
+            status = "not_requested"
+            message = "Ethereum anchoring was not requested for this report"
+        else:
+            status = "pending"
+            message = "No Ethereum transaction found yet"
+
+        return VerifyReportResponse(
+            report_id=row.report_id,
+            status=status,
+            verified=False,
+            db_hash_matches=db_hash_matches,
+            expected_hash=expected_hash,
+            recomputed_hash=recomputed_hash,
+            on_chain_hash=None,
+            tx_hash=None,
+            error=message,
+        )
+
+    chain_check = await asyncio.to_thread(verify_report_hash_on_chain, row.tx_hash, expected_hash)
+    on_chain_hash = chain_check.get("on_chain_hash")
+    chain_verified = bool(chain_check.get("verified"))
+    verified = db_hash_matches and chain_verified
+
+    if verified:
+        status = "verified"
+    elif chain_check.get("error"):
+        status = "verification_error"
+    else:
+        status = "tampered"
+
+    return VerifyReportResponse(
+        report_id=row.report_id,
+        status=status,
+        verified=verified,
+        db_hash_matches=db_hash_matches,
+        expected_hash=expected_hash,
+        recomputed_hash=recomputed_hash,
+        on_chain_hash=on_chain_hash,
+        tx_hash=row.tx_hash,
+        error=chain_check.get("error"),
+    )
+
+
+@app.get("/wall-of-shame", response_model=List[WallOfShameItem])
+def wall_of_shame(limit: int = 50, db: Session = Depends(get_db)):
+    safe_limit = min(max(limit, 1), 200)
+    rows = (
+        db.query(ReportRecord)
+        .filter(ReportRecord.risk_score >= DARK_PATTERN_THRESHOLD)
+        .order_by(ReportRecord.risk_score.desc(), ReportRecord.timestamp.desc())
+        .limit(safe_limit)
+        .all()
+    )
+
+    results: List[WallOfShameItem] = []
+    for row in rows:
+        ts = row.timestamp or row.created_at
+        results.append(
+            WallOfShameItem(
+                url=row.url,
+                risk_score=float(row.risk_score or 0.0),
+                detected_patterns=decode_detected_patterns(row.detected_patterns or row.pattern_names_json),
+                timestamp=ts.isoformat() + "Z" if ts else "",
+                blockchain_proof=bool(row.blockchain_proof),
+                blockchain_tx_hash=row.blockchain_tx_hash or row.tx_hash,
+            )
+        )
+    return results
 
 
 @app.post("/analyze-domains", response_model=AnalyzeDomainsResponse)
@@ -1274,28 +1871,73 @@ async def analyze_domains(req: AnalyzeDomainsRequest):
 
 
 @app.post("/analyze-privacy")
-async def analyze_privacy(req: PrivacyOnlyRequest):
+async def analyze_privacy(req: PrivacyOnlyRequest, db: Session = Depends(get_db)):
     risk  = calc_privacy_risk(req.privacy_data)
     level = get_risk_level(risk)
+    violations = get_privacy_violations(req.privacy_data.dict())
+    insights = make_privacy_insights(req.privacy_data)
+
+    detected_patterns = [
+        str(item.get("violation_type") or item.get("issue") or "").strip()
+        for item in violations
+        if str(item.get("violation_type") or item.get("issue") or "").strip()
+    ]
+    details = " | ".join(insights)
+
+    stored_report = _save_generated_report(
+        db=db,
+        url=req.url,
+        risk_score=risk,
+        detected_patterns=detected_patterns,
+        details=details,
+        privacy_risk=risk,
+        manipulation_risk=0.0,
+        overall_risk=risk,
+        tracker_count=len(req.privacy_data.trackers),
+    )
+
     return {
         "url": req.url,
         "privacy_risk": risk,
         "privacy_level": level,
-        "insights": make_privacy_insights(req.privacy_data),
-        "violations": get_privacy_violations(req.privacy_data.dict()),
+        "insights": insights,
+        "violations": violations,
+        **_build_report_metadata(stored_report),
     }
 
 
 @app.post("/analyze-dark-patterns")
-async def analyze_dark_patterns(req: ManipulationOnlyRequest):
+async def analyze_dark_patterns(req: ManipulationOnlyRequest, db: Session = Depends(get_db)):
     risk  = calc_manipulation_risk(req.manipulation_data)
     level = get_risk_level(risk)
+    insights = make_manipulation_insights(req.manipulation_data)
+    violations = get_manipulation_violations([p.dict() for p in req.manipulation_data.patterns])
+
+    detected_patterns = [
+        p.name for p in req.manipulation_data.patterns
+        if str(getattr(p, "name", "")).strip()
+    ]
+    details = " | ".join(insights)
+
+    stored_report = _save_generated_report(
+        db=db,
+        url=req.url,
+        risk_score=risk,
+        detected_patterns=detected_patterns,
+        details=details,
+        privacy_risk=0.0,
+        manipulation_risk=risk,
+        overall_risk=risk,
+        tracker_count=0,
+    )
+
     return {
         "url": req.url,
         "manipulation_risk": risk,
         "manipulation_level": level,
-        "insights": make_manipulation_insights(req.manipulation_data),
-        "violations": get_manipulation_violations([p.dict() for p in req.manipulation_data.patterns]),
+        "insights": insights,
+        "violations": violations,
+        **_build_report_metadata(stored_report),
     }
 
 
