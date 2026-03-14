@@ -3,3 +3,10 @@ backend/.env
 *.db
 backend/*.log
 /tmp/*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
