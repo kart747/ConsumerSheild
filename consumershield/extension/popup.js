@@ -18,9 +18,12 @@ const TRACKER_ICONS = {
 };
 
 const REPORT_PAGE_URL = chrome.runtime.getURL('report.html');
+const EXTENSION_ENABLED_KEY = 'consumershield_enabled';
 let popupRefreshAttempted = false;
+let extensionEnabled = true;
 
 document.addEventListener('DOMContentLoaded', async () => {
+  await initializeProtectionToggle();
   setupTabs();
   setupActions();
   await loadAndRender();
@@ -38,7 +41,27 @@ function setupTabs() {
 }
 
 function setupActions() {
+  document.getElementById('toggle-protection')?.addEventListener('change', async (event) => {
+    const toggle = event.currentTarget;
+    if (!(toggle instanceof HTMLInputElement)) return;
+
+    extensionEnabled = Boolean(toggle.checked);
+    popupRefreshAttempted = false;
+    chrome.storage.local.set({ [EXTENSION_ENABLED_KEY]: extensionEnabled });
+    notifyExtensionEnabledChange(extensionEnabled);
+    renderProtectionState();
+
+    if (extensionEnabled) {
+      await loadAndRender();
+    }
+  });
+
   document.getElementById('btn-rescan')?.addEventListener('click', async () => {
+    if (!extensionEnabled) {
+      alert('Protection is OFF. Turn it ON to rescan.');
+      return;
+    }
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) return;
 
@@ -52,6 +75,11 @@ function setupActions() {
   });
 
   document.getElementById('btn-report')?.addEventListener('click', async () => {
+    if (!extensionEnabled) {
+      alert('Protection is OFF. Turn it ON to generate a report.');
+      return;
+    }
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.url) return;
 
@@ -68,56 +96,61 @@ function setupActions() {
       });
     });
   });
+}
 
-  document.getElementById('btn-anchor')?.addEventListener('click', async (event) => {
-    const anchorButton = event.currentTarget;
-    if (!(anchorButton instanceof HTMLButtonElement)) return;
+async function initializeProtectionToggle() {
+  const toggle = document.getElementById('toggle-protection');
+  if (!(toggle instanceof HTMLInputElement)) return;
 
-    const existingTxHash = anchorButton.dataset.txHash;
-    if (existingTxHash) {
-      chrome.tabs.create({ url: `https://sepolia.etherscan.io/tx/${existingTxHash}` });
-      return;
-    }
+  const data = await new Promise((resolve) => {
+    chrome.storage.local.get([EXTENSION_ENABLED_KEY], resolve);
+  });
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const currentUrl = tab?.url || '';
-    if (!currentUrl) {
-      alert('Unable to determine page URL.');
-      return;
-    }
+  if (typeof data[EXTENSION_ENABLED_KEY] === 'boolean') {
+    extensionEnabled = data[EXTENSION_ENABLED_KEY];
+  } else {
+    extensionEnabled = true;
+    chrome.storage.local.set({ [EXTENSION_ENABLED_KEY]: true });
+  }
 
-    const previousText = anchorButton.textContent || '⛓️ Anchor Evidence';
-    anchorButton.textContent = '⏳ Anchoring...';
-    anchorButton.disabled = true;
+  toggle.checked = extensionEnabled;
+  renderProtectionState();
+}
 
-    try {
-      const response = await fetch('http://127.0.0.1:8000/anchor-report', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: currentUrl,
-          summary: 'Forensic Audit Complete',
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok || data?.status !== 'success' || !data?.ethereum_tx_hash) {
-        throw new Error(data?.detail || `Anchor request failed (${response.status})`);
-      }
-
-      const txHash = String(data.ethereum_tx_hash);
-      anchorButton.dataset.txHash = txHash;
-      anchorButton.textContent = '✅ View on Etherscan';
-      anchorButton.disabled = false;
-      anchorButton.style.borderColor = '#22c55e';
-      anchorButton.style.color = '#bbf7d0';
-      anchorButton.style.background = 'rgba(34, 197, 94, 0.2)';
-    } catch (error) {
-      anchorButton.textContent = previousText;
-      anchorButton.disabled = false;
-      alert(`Failed to anchor evidence: ${error.message}`);
+function notifyExtensionEnabledChange(enabled) {
+  chrome.runtime.sendMessage({ action: 'setExtensionEnabled', enabled }, () => {
+    if (chrome.runtime.lastError) {
+      // Background may be restarting. Ignore transient messaging failures.
     }
   });
+}
+
+function renderProtectionState() {
+  const icon = document.getElementById('protection-power-icon');
+  const toggleWrap = document.querySelector('.protection-toggle');
+  const scanning = document.getElementById('scanning-indicator');
+  const rescanButton = document.getElementById('btn-rescan');
+  const reportButton = document.getElementById('btn-report');
+
+  if (icon) {
+    icon.style.opacity = extensionEnabled ? '1' : '0.9';
+  }
+  if (toggleWrap) {
+    toggleWrap.classList.toggle('off', !extensionEnabled);
+    toggleWrap.setAttribute('title', extensionEnabled ? 'Protection ON' : 'Protection OFF');
+  }
+  if (scanning) {
+    scanning.classList.toggle('hidden', !extensionEnabled);
+  }
+  if (rescanButton instanceof HTMLButtonElement) {
+    rescanButton.disabled = !extensionEnabled;
+  }
+  if (reportButton instanceof HTMLButtonElement) {
+    reportButton.disabled = !extensionEnabled;
+  }
+  if (!extensionEnabled) {
+    setText('overall-insight', 'Protection is OFF. Turn it ON to scan this page again.');
+  }
 }
 
 async function captureVisibleScreenshot(tab) {
@@ -276,6 +309,11 @@ async function displayAIInsight(tab, trackers, patterns) {
 }
 
 async function loadAndRender() {
+  if (!extensionEnabled) {
+    renderProtectionState();
+    return;
+  }
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.url) return;
 

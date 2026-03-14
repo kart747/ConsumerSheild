@@ -19,6 +19,10 @@
       <div class="dot-pulse"></div>
       <span>Scanning…</span>
     </div>
+    <label class="protection-toggle" for="toggle-protection" title="ConsumerShield protection toggle">
+      <span id="protection-power-icon" aria-hidden="true">⏻</span>
+      <input type="checkbox" id="toggle-protection" checked>
+    </label>
   </div>
 
   <!-- ╔══ TAB BAR ═════════════════════════════════════════════╗ -->
@@ -153,7 +157,6 @@
   <div class="action-bar">
     <button class="btn-secondary" id="btn-rescan">🔄 Rescan</button>
     <button class="btn-primary" id="btn-report">📝 Generate Report</button>
-    <button id="btn-anchor" class="btn-secondary" style="border-color: #a855f7; color: #d8b4fe;">⛓️ Anchor Evidence</button>
   </div>
 
   <script src="popup.js"></script>

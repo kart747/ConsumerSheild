@@ -312,6 +312,43 @@
   // Avoid re-running on dynamic pages
   let analysisRun = false;
   let warmupRescanScheduled = false;
+  let extensionEnabled = true;
+  const EXTENSION_ENABLED_KEY = 'consumershield_enabled';
+
+  async function refreshExtensionEnabledState() {
+    if (!chrome?.storage?.local) return extensionEnabled;
+    const result = await new Promise((resolve) => {
+      chrome.storage.local.get([EXTENSION_ENABLED_KEY], resolve);
+    });
+
+    if (typeof result[EXTENSION_ENABLED_KEY] === 'boolean') {
+      extensionEnabled = result[EXTENSION_ENABLED_KEY];
+    } else {
+      extensionEnabled = true;
+    }
+    return extensionEnabled;
+  }
+
+  function resetAnalysisState() {
+    analysisRun = false;
+    warmupRescanScheduled = false;
+    state.trackers = [];
+    state.patterns = [];
+    state.policy = { thirdPartySharing: false, noOptOut: false, extensiveCollection: false, hasOptOut: false };
+    state.fingerprinting = false;
+  }
+
+  function clearConsumerShieldArtifacts() {
+    state.overlayElements.forEach((el) => {
+      if (!el) return;
+      el.classList.remove('cs-overlay-privacy', 'cs-overlay-manipulation');
+      if (el.dataset?.csTagged) {
+        delete el.dataset.csTagged;
+      }
+      el.querySelectorAll('.cs-tooltip').forEach((tip) => tip.remove());
+    });
+    state.overlayElements = [];
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 1. TRACKER DETECTION
@@ -1408,6 +1445,13 @@
   // ═══════════════════════════════════════════════════════════════════════════
 
   async function runAnalysis() {
+    await refreshExtensionEnabledState();
+    if (!extensionEnabled) {
+      resetAnalysisState();
+      clearConsumerShieldArtifacts();
+      return;
+    }
+
     if (analysisRun) return;
     analysisRun = true;
 
@@ -1415,11 +1459,7 @@
       warmupRescanScheduled = true;
       [2800, 6500].forEach((delayMs) => {
         setTimeout(() => {
-          analysisRun = false;
-          state.trackers = [];
-          state.patterns = [];
-          state.policy = { thirdPartySharing: false, noOptOut: false, extensiveCollection: false, hasOptOut: false };
-          state.fingerprinting = false;
+          resetAnalysisState();
           runAnalysis();
         }, delayMs);
       });
@@ -1467,12 +1507,35 @@
     }
   }
 
+  if (chrome?.runtime?.onMessage) {
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message?.action !== 'extensionEnabledChanged') return;
+
+      extensionEnabled = Boolean(message.enabled);
+      if (!extensionEnabled) {
+        resetAnalysisState();
+        clearConsumerShieldArtifacts();
+        return;
+      }
+
+      setTimeout(runAnalysis, 200);
+    });
+  }
+
   // Run after page is interactive
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', runAnalysis);
+    document.addEventListener('DOMContentLoaded', async () => {
+      await refreshExtensionEnabledState();
+      if (!extensionEnabled) return;
+      runAnalysis();
+    });
   } else {
     // Slight delay so dynamic content has time to render
-    setTimeout(runAnalysis, 800);
+    setTimeout(async () => {
+      await refreshExtensionEnabledState();
+      if (!extensionEnabled) return;
+      runAnalysis();
+    }, 800);
   }
 
   // Re-run on SPA navigation
@@ -1480,13 +1543,12 @@
   const observer = new MutationObserver(() => {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
-      analysisRun = false;
-      warmupRescanScheduled = false;
-      state.trackers = [];
-      state.patterns = [];
-      state.policy = { thirdPartySharing: false, noOptOut: false, extensiveCollection: false, hasOptOut: false };
-      state.fingerprinting = false;
-      setTimeout(runAnalysis, 1200);
+      resetAnalysisState();
+      setTimeout(async () => {
+        await refreshExtensionEnabledState();
+        if (!extensionEnabled) return;
+        runAnalysis();
+      }, 1200);
     }
   });
   observer.observe(document.body, { childList: true, subtree: true });

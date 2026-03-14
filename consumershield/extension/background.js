@@ -101,8 +101,31 @@ function mergeStoredAnalysis(domain, patch) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const BACKEND_URL = 'http://localhost:8000';
+const EXTENSION_ENABLED_KEY = 'consumershield_enabled';
 const tabTraffic = new Map();
 const auditTimers = new Map();
+let extensionEnabled = true;
+
+chrome.storage.local.get([EXTENSION_ENABLED_KEY], (result) => {
+  if (typeof result[EXTENSION_ENABLED_KEY] === 'boolean') {
+    extensionEnabled = result[EXTENSION_ENABLED_KEY];
+  } else {
+    chrome.storage.local.set({ [EXTENSION_ENABLED_KEY]: true });
+  }
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.storage.local.get([EXTENSION_ENABLED_KEY], (result) => {
+    if (typeof result[EXTENSION_ENABLED_KEY] !== 'boolean') {
+      chrome.storage.local.set({ [EXTENSION_ENABLED_KEY]: true });
+    }
+  });
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes[EXTENSION_ENABLED_KEY]) return;
+  extensionEnabled = Boolean(changes[EXTENSION_ENABLED_KEY].newValue);
+});
 
 async function sendToBackend(analysis) {
   try {
@@ -207,6 +230,7 @@ function scheduleTrafficAudit(tabId) {
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
+    if (!extensionEnabled) return;
     if (details.tabId < 0) return;
 
     const requestDomain = normalizeDomain(details.url);
@@ -245,7 +269,35 @@ chrome.webRequest.onBeforeRequest.addListener(
 // ═══════════════════════════════════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'setExtensionEnabled') {
+    extensionEnabled = Boolean(request.enabled);
+    chrome.storage.local.set({ [EXTENSION_ENABLED_KEY]: extensionEnabled }, () => {
+      chrome.tabs.query({}, (tabs) => {
+        tabs.forEach((tab) => {
+          if (typeof tab.id !== 'number') return;
+          if (!extensionEnabled) {
+            chrome.action.setBadgeText({ text: '', tabId: tab.id }).catch(() => {});
+          }
+          chrome.tabs.sendMessage(tab.id, {
+            action: 'extensionEnabledChanged',
+            enabled: extensionEnabled,
+          }).catch(() => {});
+        });
+      });
+      sendResponse({ success: true, enabled: extensionEnabled });
+    });
+    return true;
+  }
+
   if (request.action === 'analyzeComplete') {
+    if (!extensionEnabled) {
+      if (sender.tab?.id) {
+        chrome.action.setBadgeText({ text: '', tabId: sender.tab.id }).catch(() => {});
+      }
+      sendResponse({ success: true, skipped: true, reason: 'disabled' });
+      return true;
+    }
+
     const data = request.data;
     const domain = normalizeDomain(data.url);
     const fallbackDetectedDomains = [...new Set(
