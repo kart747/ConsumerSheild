@@ -50,6 +50,7 @@ from ethereum_anchor import (
     build_report_keccak,
     store_precomputed_hash_on_chain,
     verify_report_hash_on_chain,
+    DuplicateReportAnchoringError,
 )
 
 load_dotenv()
@@ -1358,6 +1359,11 @@ def _anchor_report_if_needed(db: Session, report: ReportRecord) -> ReportRecord:
         report.tx_hash = tx_hash
         report.anchor_status = "anchored"
         report.anchor_error = None
+    except DuplicateReportAnchoringError:
+        # Hash already on-chain from a prior transaction — treat as anchored.
+        report.blockchain_proof = True
+        report.anchor_status = "anchored"
+        report.anchor_error = "duplicate_already_on_chain"
     except Exception as exc:
         report.blockchain_proof = False
         report.blockchain_tx_hash = None

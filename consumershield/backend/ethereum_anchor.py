@@ -1,17 +1,18 @@
 """
 Ethereum anchoring utilities for ConsumerShield evidence records.
 
-This module stores a SHA256 hash of a report payload in the EvidenceRegistry
-contract on Sepolia, so the backend can return an immutable proof transaction.
+This module stores a deterministic bytes32 keccak hash of a report payload in
+the EvidenceRegistry contract on Sepolia, so the backend can return an
+immutable proof transaction.
 """
 
-import hashlib
 import json
 import logging
 import os
 from typing import Any, Dict
 
 from web3 import Web3
+from web3.exceptions import ContractLogicError
 
 logger = logging.getLogger("consumershield.ethereum")
 
@@ -20,17 +21,10 @@ SEPOLIA_CHAIN_ID = 11155111
 # Minimal ABI for the EvidenceRegistry contract.
 EVIDENCE_REGISTRY_ABI = [
     {
-        "inputs": [{"internalType": "string", "name": "hash", "type": "string"}],
+        "inputs": [{"internalType": "bytes32", "name": "reportHash", "type": "bytes32"}],
         "name": "storeHash",
         "outputs": [],
         "stateMutability": "nonpayable",
-        "type": "function",
-    },
-    {
-        "inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-        "name": "reports",
-        "outputs": [{"internalType": "string", "name": "", "type": "string"}],
-        "stateMutability": "view",
         "type": "function",
     },
 ]
@@ -40,6 +34,10 @@ ABI = EVIDENCE_REGISTRY_ABI
 
 class BlockchainAnchoringError(Exception):
     """Raised when report anchoring on Ethereum fails."""
+
+
+class DuplicateReportAnchoringError(BlockchainAnchoringError):
+    """Raised when the contract rejects a report hash as already stored."""
 
 
 def build_report_sha256(report_data: Dict[str, Any]) -> str:
@@ -54,14 +52,18 @@ def build_report_sha256(report_data: Dict[str, Any]) -> str:
 
 
 def build_report_keccak(report_data: Dict[str, Any]) -> str:
-    """Create deterministic EVM-compatible hash (0x...) from sorted report JSON."""
-    report_json = json.dumps(
-        report_data,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
+    """Create a deterministic EVM-compatible hex hash from sorted report JSON.
+
+    The timestamp is excluded from hash computation so logically identical
+    reports always map to the same hash regardless of when they were submitted.
+    """
+    stable_report = {k: v for k, v in report_data.items() if k != "timestamp"}
+    report_json = json.dumps(stable_report, sort_keys=True, separators=(",", ":"), default=str)
     return Web3.keccak(text=report_json).hex()
+
+
+def _is_duplicate_report_error(error: Exception) -> bool:
+    return "report already stored" in str(error).lower()
 
 
 def _first_available_env(*names: str) -> str:
@@ -96,17 +98,40 @@ def _store_hash_string_on_chain(report_hash: str) -> str:
     )
 
     account = web3.eth.account.from_key(private_key)
-    nonce = web3.eth.get_transaction_count(account.address)
+    wallet_address = account.address
 
-    tx_call = contract.functions.storeHash(report_hash)
-    gas_estimate = tx_call.estimate_gas({"from": account.address})
+    # Convert hex string to bytes32 for the contract parameter
+    hash_bytes = bytes.fromhex(report_hash.lstrip("0x"))
+
+    tx_call = contract.functions.storeHash(hash_bytes)
+
+    # Preflight: simulate the transaction before broadcasting to catch
+    # contract-level rejections (e.g. duplicate) without spending gas.
+    try:
+        tx_call.call({"from": wallet_address})
+    except ContractLogicError as exc:
+        if _is_duplicate_report_error(exc):
+            raise DuplicateReportAnchoringError(
+                "Duplicate report already anchored on blockchain"
+            ) from exc
+        raise BlockchainAnchoringError(
+            f"Smart contract rejected report hash: {exc}"
+        ) from exc
+    except Exception as exc:
+        if _is_duplicate_report_error(exc):
+            raise DuplicateReportAnchoringError(
+                "Duplicate report already anchored on blockchain"
+            ) from exc
+        raise BlockchainAnchoringError(
+            f"Failed preflight contract call: {exc}"
+        ) from exc
 
     transaction = tx_call.build_transaction(
         {
-            "from": account.address,
-            "nonce": nonce,
+            "from": wallet_address,
+            "nonce": web3.eth.get_transaction_count(wallet_address),
             "chainId": chain_id,
-            "gas": int(gas_estimate * 1.2),
+            "gas": 200000,
             "gasPrice": web3.eth.gas_price,
         }
     )
@@ -130,11 +155,17 @@ def store_report_hash_on_chain(report_data: dict) -> str:
     Returns the Ethereum transaction hash if successful.
     """
     try:
-        report_hash = build_report_sha256(report_data)
+        report_hash = build_report_keccak(report_data)
         return _store_hash_string_on_chain(report_hash)
+    except DuplicateReportAnchoringError:
+        raise
     except BlockchainAnchoringError:
         raise
     except Exception as exc:
+        if _is_duplicate_report_error(exc):
+            raise DuplicateReportAnchoringError(
+                "Duplicate report already anchored on blockchain"
+            ) from exc
         raise BlockchainAnchoringError(f"Failed to store report hash on-chain: {exc}") from exc
 
 
@@ -146,9 +177,15 @@ def store_precomputed_hash_on_chain(report_hash: str) -> str:
 
     try:
         return _store_hash_string_on_chain(normalized_hash)
+    except DuplicateReportAnchoringError:
+        raise
     except BlockchainAnchoringError:
         raise
     except Exception as exc:
+        if _is_duplicate_report_error(exc):
+            raise DuplicateReportAnchoringError(
+                "Duplicate report already anchored on blockchain"
+            ) from exc
         raise BlockchainAnchoringError(f"Failed to store precomputed hash on-chain: {exc}") from exc
 
 
