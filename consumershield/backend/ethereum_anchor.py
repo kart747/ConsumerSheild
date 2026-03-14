@@ -1,17 +1,18 @@
 """
 Ethereum anchoring utilities for ConsumerShield evidence records.
 
-This module stores a SHA256 hash of a report payload in the EvidenceRegistry
-contract on Sepolia, so the backend can return an immutable proof transaction.
+This module stores a deterministic bytes32 keccak hash of a report payload in
+the EvidenceRegistry contract on Sepolia, so the backend can return an
+immutable proof transaction.
 """
 
-import hashlib
 import json
 import logging
 import os
 from typing import Any, Dict
 
 from web3 import Web3
+from web3.exceptions import ContractLogicError
 
 logger = logging.getLogger("consumershield.ethereum")
 
@@ -20,17 +21,10 @@ SEPOLIA_CHAIN_ID = 11155111
 # Minimal ABI for the EvidenceRegistry contract.
 EVIDENCE_REGISTRY_ABI = [
     {
-        "inputs": [{"internalType": "string", "name": "hash", "type": "string"}],
+        "inputs": [{"internalType": "bytes32", "name": "reportHash", "type": "bytes32"}],
         "name": "storeHash",
         "outputs": [],
         "stateMutability": "nonpayable",
-        "type": "function",
-    },
-    {
-        "inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-        "name": "reports",
-        "outputs": [{"internalType": "string", "name": "", "type": "string"}],
-        "stateMutability": "view",
         "type": "function",
     },
 ]
@@ -42,15 +36,21 @@ class BlockchainAnchoringError(Exception):
     """Raised when report anchoring on Ethereum fails."""
 
 
-def build_report_sha256(report_data: Dict[str, Any]) -> str:
-    """Create a deterministic SHA256 hash from report JSON."""
-    report_json = json.dumps(
-        report_data,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(report_json.encode("utf-8")).hexdigest()
+class DuplicateReportAnchoringError(BlockchainAnchoringError):
+    """Raised when the contract rejects a report hash as already stored."""
+
+
+def build_report_keccak(report_data: Dict[str, Any]) -> bytes:
+    """Create a deterministic bytes32 keccak hash from report JSON.
+
+    The timestamp remains in the stored/report response payload, but is excluded
+    from hash computation so logically identical reports map to the same hash.
+    """
+    stable_report = {
+        key: value for key, value in report_data.items() if key != "timestamp"
+    }
+    report_json = json.dumps(stable_report, sort_keys=True)
+    return Web3.keccak(text=report_json)
 
 
 def _first_available_env(*names: str) -> str:
@@ -61,6 +61,10 @@ def _first_available_env(*names: str) -> str:
     raise BlockchainAnchoringError(
         "Missing required environment variable. Expected one of: " + ", ".join(names)
     )
+
+
+def _is_duplicate_report_error(error: Exception) -> bool:
+    return "report already stored" in str(error).lower()
 
 
 def store_report_hash_on_chain(report_data: dict) -> str:
@@ -80,7 +84,7 @@ def store_report_hash_on_chain(report_data: dict) -> str:
         chain_id = int(os.getenv("ETH_CHAIN_ID", str(SEPOLIA_CHAIN_ID)))
         receipt_timeout = int(os.getenv("ETH_RECEIPT_TIMEOUT_SEC", "180"))
 
-        report_hash = build_report_sha256(report_data)
+        report_hash = build_report_keccak(report_data)
 
         web3 = Web3(Web3.HTTPProvider(rpc_url))
         if not web3.is_connected():
@@ -92,17 +96,34 @@ def store_report_hash_on_chain(report_data: dict) -> str:
         )
 
         account = web3.eth.account.from_key(private_key)
-        nonce = web3.eth.get_transaction_count(account.address)
+        wallet_address = account.address
 
         tx_call = contract.functions.storeHash(report_hash)
-        gas_estimate = tx_call.estimate_gas({"from": account.address})
+        try:
+            tx_call.call({"from": wallet_address})
+        except ContractLogicError as exc:
+            if _is_duplicate_report_error(exc):
+                raise DuplicateReportAnchoringError(
+                    "Duplicate report already anchored on blockchain"
+                ) from exc
+            raise BlockchainAnchoringError(
+                f"Smart contract rejected report hash: {exc}"
+            ) from exc
+        except Exception as exc:
+            if _is_duplicate_report_error(exc):
+                raise DuplicateReportAnchoringError(
+                    "Duplicate report already anchored on blockchain"
+                ) from exc
+            raise BlockchainAnchoringError(
+                f"Failed preflight contract call: {exc}"
+            ) from exc
 
         transaction = tx_call.build_transaction(
             {
-                "from": account.address,
-                "nonce": nonce,
+                "from": wallet_address,
+                "nonce": web3.eth.get_transaction_count(wallet_address),
                 "chainId": chain_id,
-                "gas": int(gas_estimate * 1.2),
+                "gas": 200000,
                 "gasPrice": web3.eth.gas_price,
             }
         )
@@ -118,7 +139,13 @@ def store_report_hash_on_chain(report_data: dict) -> str:
         logger.info("Blockchain proof stored successfully. tx_hash=%s", tx_hash_hex)
         return tx_hash_hex
 
+    except DuplicateReportAnchoringError:
+        raise
     except BlockchainAnchoringError:
         raise
     except Exception as exc:
+        if _is_duplicate_report_error(exc):
+            raise DuplicateReportAnchoringError(
+                "Duplicate report already anchored on blockchain"
+            ) from exc
         raise BlockchainAnchoringError(f"Failed to store report hash on-chain: {exc}") from exc

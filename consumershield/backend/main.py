@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 try:
     from .ethereum_anchor import (
         BlockchainAnchoringError,
+        DuplicateReportAnchoringError,
         store_report_hash_on_chain,
     )
     from .regulatory_database import (
@@ -34,6 +35,7 @@ try:
 except ImportError:
     from ethereum_anchor import (
         BlockchainAnchoringError,
+        DuplicateReportAnchoringError,
         store_report_hash_on_chain,
     )
     from regulatory_database import (
@@ -146,6 +148,7 @@ class CompleteResponse(BaseModel):
     ethereum_tx_hash: Optional[str] = None
     report: Dict[str, Any] = {}
     report_file: Optional[str] = None
+    error: Optional[str] = None
 
 
 class EthereumAnchorTestResponse(BaseModel):
@@ -176,10 +179,28 @@ def anchor_report_proof(report_data: Dict[str, Any]) -> Dict[str, Any]:
         tx_hash = store_report_hash_on_chain(report_data)
         if tx_hash and not tx_hash.startswith("0x"):
             tx_hash = f"0x{tx_hash}"
-        return {"blockchain_proof_stored": True, "ethereum_tx_hash": tx_hash, "report_file": report_file}
+        return {
+            "blockchain_proof_stored": True,
+            "ethereum_tx_hash": tx_hash,
+            "report_file": report_file,
+            "error": None,
+        }
+    except DuplicateReportAnchoringError as exc:
+        logger.info("[ConsumerShield] Duplicate blockchain report ignored: %s", exc)
+        return {
+            "blockchain_proof_stored": False,
+            "ethereum_tx_hash": None,
+            "report_file": report_file,
+            "error": str(exc),
+        }
     except BlockchainAnchoringError as exc:
         logger.warning("[ConsumerShield] Blockchain anchoring failed: %s", exc)
-        return {"blockchain_proof_stored": False, "ethereum_tx_hash": None, "report_file": report_file}
+        return {
+            "blockchain_proof_stored": False,
+            "ethereum_tx_hash": None,
+            "report_file": report_file,
+            "error": str(exc),
+        }
 
 # ── Risk Calculators ──────────────────────────────────────────
 
@@ -327,7 +348,7 @@ async def test_ethereum_anchor():
             ethereum_tx_hash=result["ethereum_tx_hash"],
             report=report_data,
             report_file=result["report_file"],
-            error=None,
+            error=result["error"],
         )
     except Exception as exc:
         logger.warning("[ConsumerShield] Test Ethereum anchor failed: %s", exc)
@@ -396,6 +417,7 @@ async def analyze_complete(req: CompleteRequest):
         ethereum_tx_hash=blockchain_result["ethereum_tx_hash"],
         report=report_data,
         report_file=blockchain_result["report_file"],
+        error=blockchain_result["error"],
     )
 
 
@@ -427,6 +449,7 @@ async def analyze_privacy(req: PrivacyOnlyRequest):
         "ethereum_tx_hash": blockchain_result["ethereum_tx_hash"],
         "report": report_data,
         "report_file": blockchain_result["report_file"],
+        "error": blockchain_result["error"],
     }
 
 
@@ -458,4 +481,5 @@ async def analyze_dark_patterns(req: ManipulationOnlyRequest):
         "ethereum_tx_hash": blockchain_result["ethereum_tx_hash"],
         "report": report_data,
         "report_file": blockchain_result["report_file"],
+        "error": blockchain_result["error"],
     }
